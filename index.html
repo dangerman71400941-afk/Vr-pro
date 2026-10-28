@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VR Hands Room</title>
+  <title>VR Party Room</title>
 
   <script src="https://cdn.jsdelivr.net/npm/aframe@1.7.1/dist/aframe.min.js"></script>
   <script>
@@ -36,9 +36,11 @@
     });
 
     if (window.AFRAME) {
+      var THREE = AFRAME.THREE;
       var COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'indigo', 'violet'];
+      var rnd = function (a, b) { return a + Math.random() * (b - a); };
 
-      // كرة قابلة للإمساك والرمي مع فيزياء بسيطة (جاذبية + ارتداد)
+      /* ---------- كرة قابلة للإمساك والرمي (فيزياء بسيطة) ---------- */
       AFRAME.registerComponent('throwable', {
         schema: { start: { default: 0 }, radius: { default: 0.12 } },
         init: function () {
@@ -47,7 +49,7 @@
           this.held = false;
           this.i = this.data.start % COLORS.length;
           this.paint();
-          this.el.addEventListener('click', function () { self.next(); });  // للماوس
+          this.el.addEventListener('click', function () { self.next(); });
         },
         paint: function () { this.el.setAttribute('material', 'color', COLORS[this.i]); },
         next: function () { this.i = (this.i + 1) % COLORS.length; this.paint(); },
@@ -55,20 +57,14 @@
           if (this.held) return;
           dt = Math.min(dt, 50) / 1000;
           var p = this.el.object3D.position, v = this.v, r = this.data.radius, grounded = false;
-
           v.y -= 9.8 * dt;
           p.addScaledVector(v, dt);
-
-          // سطح الطاولة (مركزها 0,?,-3 وعرضها 1.5 وارتفاعها 1)
           if (Math.abs(p.x) < 0.75 && Math.abs(p.z + 3) < 0.75 && p.y - r < 1 && p.y - r > 0.8 && v.y < 0) {
-            p.y = 1 + r; v.y *= -0.4; grounded = true;
+            p.y = 1 + r; v.y *= -0.4; grounded = true;       // سطح الطاولة
           }
-          // الأرضية
-          if (p.y < r) { p.y = r; v.y *= -0.6; grounded = true; }
+          if (p.y < r) { p.y = r; v.y *= -0.6; grounded = true; }   // الأرضية
           if (grounded && Math.abs(v.y) < 0.4) v.y = 0;
           if (grounded) { var f = Math.max(0, 1 - 1.5 * dt); v.x *= f; v.z *= f; }
-
-          // السقف والجدران (الغرفة 8×8×4)
           if (p.y > 4 - r) { p.y = 4 - r; v.y *= -0.5; }
           var L = 4 - r;
           if (p.x > L)  { p.x = L;  v.x *= -0.6; }
@@ -78,78 +74,304 @@
         }
       });
 
-      // قرصة اليد (إبهام + سبابة): role=grab للإمساك والرمي، role=walk للمشي
-      AFRAME.registerComponent('pinch-actions', {
-        schema: { role: { default: 'grab' } },
+      /* ---------- اليدان: رسم المفاصل من بيانات WebXR مباشرة + قرصة ----------
+         المواضع تُقرأ من XRFrame وتُحوَّل إلى إحداثيات العالم عبر المنصة #rig،
+         وهي نفس الإحداثيات المستخدمة في الإمساك، فيتطابق الشكل مع يدك الحقيقية. */
+      AFRAME.registerComponent('hand-rig', {
         init: function () {
-          var self = this;
-          this.pinching = false;
-          this.held = null;
-          this.hist = [];
+          this.geo = new THREE.SphereGeometry(1, 8, 6);
+          this.mat = new THREE.MeshBasicMaterial({ color: 0xffcfa8 });
+          this.hands = {};
           this.dir = new THREE.Vector3();
-          this.el.addEventListener('pinchstarted', function (e) {
-            self.pinching = true;
-            if (self.data.role === 'grab') self.grab(self.toWorld(e.detail.position));
-          });
-          this.el.addEventListener('pinchmoved', function (e) {
-            if (self.held) self.drag(self.toWorld(e.detail.position));
-          });
-          this.el.addEventListener('pinchended', function () {
-            self.pinching = false;
-            self.release();
-          });
         },
-        toWorld: function (p) {
-          var v = new THREE.Vector3(p.x, p.y, p.z);
-          this.el.object3D.parent.localToWorld(v);   // الإحداثيات نسبة إلى المنصة #rig
-          return v;
+        getHand: function (key) {
+          var h = this.hands[key];
+          if (!h) {
+            h = this.hands[key] = { group: new THREE.Group(), meshes: {}, mid: new THREE.Vector3(),
+                                    pinching: false, walking: false, held: null, hist: [] };
+            this.el.sceneEl.object3D.add(h.group);
+          }
+          return h;
         },
-        grab: function (tip) {
-          var best = null, bestD = 0.18, tmp = new THREE.Vector3();
+        grab: function (h) {
+          var best = null, bestD = 0.2, tmp = new THREE.Vector3();
           document.querySelectorAll('[throwable]').forEach(function (b) {
-            if (b.components.throwable.held) return;
-            var d = b.object3D.getWorldPosition(tmp).distanceTo(tip);
+            var c = b.components.throwable;
+            if (c.held) return;
+            var d = b.object3D.getWorldPosition(tmp).distanceTo(h.mid);
             if (d < bestD) { bestD = d; best = b; }
           });
-          if (!best) return;
-          this.held = best;
+          if (!best) return false;
+          h.held = best;
           best.components.throwable.held = true;
           best.components.throwable.v.set(0, 0, 0);
-          best.components.throwable.next();          // يتغير اللون عند الإمساك
-          this.hist = [];
-          this.drag(tip);
+          best.components.throwable.next();
+          h.hist = [];
+          return true;
         },
-        drag: function (pos) {
-          this.held.object3D.position.copy(pos);
-          this.hist.push({ t: performance.now(), p: pos.clone() });
-          while (this.hist.length > 2 && performance.now() - this.hist[0].t > 120) this.hist.shift();
+        drag: function (h) {
+          h.held.object3D.position.copy(h.mid);
+          h.hist.push({ t: performance.now(), p: h.mid.clone() });
+          while (h.hist.length > 2 && performance.now() - h.hist[0].t > 120) h.hist.shift();
         },
-        release: function () {
-          if (!this.held) return;
-          var comp = this.held.components.throwable, h = this.hist;
-          if (h.length >= 2) {
-            var a = h[0], b = h[h.length - 1], dt = (b.t - a.t) / 1000;
-            if (dt > 0) {
-              comp.v.copy(b.p).sub(a.p).divideScalar(dt).multiplyScalar(1.2);
-              if (comp.v.length() > 12) comp.v.setLength(12);
-            }
+        release: function (h) {
+          if (!h.held) return;
+          var c = h.held.components.throwable, a = h.hist[0], b = h.hist[h.hist.length - 1];
+          if (a && b && b.t > a.t) {
+            c.v.copy(b.p).sub(a.p).divideScalar((b.t - a.t) / 1000).multiplyScalar(1.2);
+            if (c.v.length() > 12) c.v.setLength(12);
           }
-          comp.held = false;
-          this.held = null;
-          this.hist = [];
+          c.held = false;
+          h.held = null;
+          h.hist = [];
         },
         tick: function (t, dt) {
-          if (this.data.role !== 'walk' || !this.pinching) return;
-          var scene = this.el.sceneEl, rig = document.getElementById('rig').object3D;
-          scene.camera.getWorldDirection(this.dir);
-          this.dir.y = 0;
-          if (this.dir.lengthSq() < 1e-6) return;
-          this.dir.normalize();
-          rig.position.addScaledVector(this.dir, 1.6 * Math.min(dt, 50) / 1000);
-          rig.position.x = Math.max(-3.4, Math.min(3.4, rig.position.x));
-          rig.position.z = Math.max(-3.4, Math.min(3.4, rig.position.z));
+          var self = this, scene = this.el.sceneEl, frame = scene.frame;
+          var xr = scene.renderer && scene.renderer.xr;
+          var rig = this.el.object3D, seen = {};
+
+          if (!xr || !frame || !xr.isPresenting) {
+            for (var k in this.hands) this.hands[k].group.visible = false;
+            return;
+          }
+          var session = xr.getSession(), ref = xr.getReferenceSpace();
+          if (!session || !ref) return;
+          rig.updateWorldMatrix(true, false);
+
+          session.inputSources.forEach(function (src) {
+            if (!src.hand) return;
+            var key = src.handedness === 'left' ? 'left' : 'right';
+            var h = self.getHand(key);
+            seen[key] = true;
+            h.group.visible = true;
+
+            src.hand.forEach(function (space, name) {
+              var pose = frame.getJointPose(space, ref), m = h.meshes[name];
+              if (!m) { m = h.meshes[name] = new THREE.Mesh(self.geo, self.mat); h.group.add(m); }
+              if (!pose) { m.visible = false; return; }
+              m.visible = true;
+              var p = pose.transform.position;
+              m.position.set(p.x, p.y, p.z);
+              rig.localToWorld(m.position);
+              m.scale.setScalar(Math.max(pose.radius || 0.008, 0.006));
+            });
+
+            var th = h.meshes['thumb-tip'], ix = h.meshes['index-finger-tip'];
+            if (!th || !ix || !th.visible || !ix.visible) return;
+            var d = th.position.distanceTo(ix.position);
+            h.mid.copy(th.position).add(ix.position).multiplyScalar(0.5);
+            if (!h.pinching && d < 0.03) {
+              h.pinching = true;
+              h.walking = !self.grab(h);          // قرصة قرب كرة = إمساك، وإلا = مشي
+            } else if (h.pinching && d > 0.055) {
+              h.pinching = false; h.walking = false;
+              self.release(h);
+            }
+            if (h.pinching && h.held) self.drag(h);
+          });
+
+          for (var key in this.hands) {
+            var hh = this.hands[key];
+            if (!seen[key]) {
+              hh.group.visible = false;
+              if (hh.pinching) { hh.pinching = false; hh.walking = false; this.release(hh); }
+            }
+          }
+
+          var L = this.hands.left, R = this.hands.right;
+          if ((L && L.walking) || (R && R.walking)) {
+            scene.camera.getWorldDirection(this.dir);
+            this.dir.y = 0;
+            if (this.dir.lengthSq() > 1e-6) {
+              this.dir.normalize();
+              rig.position.addScaledVector(this.dir, 1.6 * Math.min(dt, 50) / 1000);
+              rig.position.x = Math.max(-3.4, Math.min(3.4, rig.position.x));
+              rig.position.z = Math.max(-3.4, Math.min(3.4, rig.position.z));
+            }
+          }
         }
       });
+
+      /* ---------- قصاصات ورقية متساقطة (InstancedMesh واحد) ---------- */
+      AFRAME.registerComponent('confetti', {
+        schema: { count: { default: 180 } },
+        init: function () {
+          var n = this.data.count, c = new THREE.Color();
+          this.mesh = new THREE.InstancedMesh(new THREE.PlaneGeometry(0.07, 0.04),
+                        new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }), n);
+          this.mesh.frustumCulled = false;
+          this.items = [];
+          for (var i = 0; i < n; i++) {
+            this.items.push({ x: rnd(-3.8, 3.8), y: rnd(0, 4), z: rnd(-3.8, 3.8), vy: rnd(0.3, 0.7),
+                              rx: rnd(0, 6.3), ry: rnd(0, 6.3), sp: rnd(1, 3), ph: rnd(0, 6.3) });
+            this.mesh.setColorAt(i, c.setHSL(Math.random(), 0.9, 0.55));
+          }
+          this.mesh.instanceColor.needsUpdate = true;
+          this.o = new THREE.Object3D();
+          this.el.setObject3D('mesh', this.mesh);
+        },
+        tick: function (t, dt) {
+          dt = Math.min(dt, 50) / 1000;
+          var s = t / 1000, o = this.o;
+          for (var i = 0; i < this.items.length; i++) {
+            var q = this.items[i];
+            q.y -= q.vy * dt;
+            if (q.y < 0) { q.y = 4; q.x = rnd(-3.8, 3.8); q.z = rnd(-3.8, 3.8); }
+            q.rx += q.sp * dt * 2; q.ry += q.sp * dt;
+            o.position.set(q.x + Math.sin(s + q.ph) * 0.15, q.y, q.z + Math.cos(s * 0.8 + q.ph) * 0.15);
+            o.rotation.set(q.rx, q.ry, 0);
+            o.updateMatrix();
+            this.mesh.setMatrixAt(i, o.matrix);
+          }
+          this.mesh.instanceMatrix.needsUpdate = true;
+        }
+      });
+
+      /* ---------- رقص: قفز + تمايل لكل شخصية ---------- */
+      AFRAME.registerComponent('party-dance', {
+        schema: { height: { default: 0.12 }, speed: { default: 2.2 }, sway: { default: 22 } },
+        init: function () { this.ph = Math.random() * 6.28; },
+        tick: function (t) {
+          var o = this.el.object3D;
+          if (!this.base) { this.base = o.position.clone(); this.yaw = o.rotation.y; }
+          var s = t / 1000 * this.data.speed + this.ph;
+          o.position.y = this.base.y + Math.abs(Math.sin(s)) * this.data.height;
+          o.rotation.y = this.yaw + Math.sin(s * 0.5) * THREE.MathUtils.degToRad(this.data.sway);
+          o.rotation.z = Math.sin(s) * 0.05;
+        }
+      });
+
+      /* ---------- نموذج GLB: تحجيم تلقائي + تشغيل حركة النموذج إن وُجدت ---------- */
+      AFRAME.registerComponent('glb-dancer', {
+        schema: { src: { type: 'string' }, height: { default: 1.5 }, clip: { default: '' } },
+        init: function () {
+          var el = this.el, d = this.data, self = this;
+          this.mixer = null;
+          var holder = document.createElement('a-entity');
+          holder.setAttribute('gltf-model', d.src);
+          el.appendChild(holder);
+          holder.addEventListener('model-loaded', function () {
+            var m = holder.getObject3D('mesh');
+            var box = new THREE.Box3().setFromObject(m), size = box.getSize(new THREE.Vector3());
+            var s = d.height / (size.y || 1);
+            var baseY = el.object3D.position.y;
+            m.scale.multiplyScalar(s);
+            m.position.y -= (box.min.y - baseY) * s;      // القاعدة على الأرض
+            var clips = m.animations || [];
+            var clip = clips.filter(function (c) { return d.clip && c.name.toLowerCase().indexOf(d.clip.toLowerCase()) >= 0; })[0] || clips[0];
+            if (clip) { self.mixer = new THREE.AnimationMixer(m); self.mixer.clipAction(clip).play(); }
+          });
+          holder.addEventListener('model-error', function () { console.warn('تعذّر تحميل النموذج: ' + d.src); });
+        },
+        tick: function (t, dt) { if (this.mixer) this.mixer.update(Math.min(dt, 50) / 1000); }
+      });
+
+      /* ---------- شخصيات مبنية من مجسمات بسيطة (فضائي، أرنب، قطة، أنمي) ---------- */
+      var mk = function (p, tag, a) {
+        var e = document.createElement(tag);
+        for (var k in a) e.setAttribute(k, a[k]);
+        p.appendChild(e);
+        return e;
+      };
+      var animeEyes = function (el, iris) {
+        [-1, 1].forEach(function (s) {
+          var x = s * 0.09;
+          mk(el, 'a-sphere', { radius: 0.06, position: x + ' .85 .21', scale: '1 1.3 .4', color: '#fff' });
+          mk(el, 'a-sphere', { radius: 0.04, position: x + ' .85 .225', scale: '1 1.3 .4', color: iris });
+          mk(el, 'a-sphere', { radius: 0.018, position: x + ' .85 .24', color: '#000' });
+        });
+      };
+      var BUILD = {
+        alien: function (el) {
+          var c = '#6ee7b7';
+          mk(el, 'a-sphere', { radius: 0.2, position: '0 .4 0', scale: '1 1.4 1', color: c });
+          mk(el, 'a-sphere', { radius: 0.3, position: '0 1 0', scale: '1.1 1 1', color: c });
+          [-1, 1].forEach(function (s) {
+            mk(el, 'a-sphere', { radius: 0.1, position: (s * 0.15) + ' 1.02 .22', scale: '1 1.5 .5', color: '#111' });
+            mk(el, 'a-cylinder', { radius: 0.012, height: 0.25, position: (s * 0.12) + ' 1.42 0', rotation: '0 0 ' + (-s * 18), color: c });
+            mk(el, 'a-sphere', { radius: 0.045, position: (s * 0.17) + ' 1.55 0', color: '#f0abfc' });
+            mk(el, 'a-cylinder', { radius: 0.04, height: 0.35, position: (s * 0.1) + ' .17 0', color: c });
+          });
+        },
+        bunny: function (el) {
+          mk(el, 'a-sphere', { radius: 0.25, position: '0 .3 0', scale: '1 1.1 1', color: '#fafafa' });
+          mk(el, 'a-sphere', { radius: 0.2, position: '0 .78 0', color: '#fafafa' });
+          mk(el, 'a-sphere', { radius: 0.07, position: '0 .25 -.25', color: '#fff' });
+          mk(el, 'a-sphere', { radius: 0.025, position: '0 .76 .195', color: '#f9a8d4' });
+          [-1, 1].forEach(function (s) {
+            mk(el, 'a-sphere', { radius: 0.08, position: (s * 0.1) + ' 1.12 -.02', scale: '.5 2.3 .4', rotation: '0 0 ' + (-s * 8), color: '#fafafa' });
+            mk(el, 'a-sphere', { radius: 0.03, position: (s * 0.08) + ' .82 .18', color: '#111' });
+          });
+        },
+        cat: function (el) {
+          var c = '#fb923c';
+          mk(el, 'a-sphere', { radius: 0.25, position: '0 .32 0', scale: '1 1.1 1', color: c });
+          mk(el, 'a-sphere', { radius: 0.2, position: '0 .8 0', color: c });
+          mk(el, 'a-cylinder', { radius: 0.03, height: 0.45, position: '0 .4 -.3', rotation: '40 0 0', color: c });
+          mk(el, 'a-sphere', { radius: 0.025, position: '0 .77 .195', color: '#f9a8d4' });
+          [-1, 1].forEach(function (s) {
+            mk(el, 'a-cone', { 'radius-bottom': 0.08, 'radius-top': 0, height: 0.16, position: (s * 0.12) + ' 1 0', color: c });
+            mk(el, 'a-sphere', { radius: 0.03, position: (s * 0.08) + ' .83 .175', color: '#22c55e' });
+          });
+        },
+        girl: function (el) {
+          var hair = '#f472b6', skin = '#ffe0c8';
+          mk(el, 'a-cone', { 'radius-bottom': 0.22, 'radius-top': 0.1, height: 0.45, position: '0 .35 0', color: '#a78bfa' });
+          mk(el, 'a-sphere', { radius: 0.24, position: '0 .85 0', color: skin });
+          mk(el, 'a-sphere', { radius: 0.26, position: '0 .9 -.06', color: hair });
+          mk(el, 'a-sphere', { radius: 0.12, position: '0 1.02 .17', scale: '1.6 .5 .6', color: hair });
+          animeEyes(el, '#38bdf8');
+          [-1, 1].forEach(function (s) {
+            mk(el, 'a-sphere', { radius: 0.09, position: (s * 0.3) + ' .75 -.02', scale: '1 2.2 1', color: hair });
+            mk(el, 'a-cylinder', { radius: 0.035, height: 0.2, position: (s * 0.08) + ' .1 0', color: skin });
+          });
+        },
+        boy: function (el) {
+          var hair = '#3b82f6', skin = '#ffe0c8';
+          mk(el, 'a-cylinder', { radius: 0.15, height: 0.4, position: '0 .4 0', color: '#f97316' });
+          mk(el, 'a-sphere', { radius: 0.24, position: '0 .85 0', color: skin });
+          mk(el, 'a-sphere', { radius: 0.26, position: '0 .9 -.06', color: hair });
+          animeEyes(el, '#16a34a');
+          [-2, -1, 0, 1, 2].forEach(function (i) {
+            mk(el, 'a-cone', { 'radius-bottom': 0.07, 'radius-top': 0, height: 0.22, position: (i * 0.1) + ' 1.18 ' + (0.04 - Math.abs(i) * 0.03), rotation: '0 0 ' + (-i * 14), color: hair });
+          });
+          [-1, 1].forEach(function (s) {
+            mk(el, 'a-cylinder', { radius: 0.04, height: 0.22, position: (s * 0.08) + ' .11 0', color: '#1e3a8a' });
+          });
+        }
+      };
+      AFRAME.registerComponent('toon', {
+        schema: { type: { default: 'alien' } },
+        init: function () { BUILD[this.data.type](this.el); }
+      });
+
+      /* ---------- الحفلة: عشر شخصيات موزعة على حلقة داخل الغرفة ---------- */
+      var M = 'https://modelviewer.dev/shared-assets/models/';
+      var CAST = [
+        { glb: M + 'RobotExpressive.glb', h: 1.5, clip: 'Dance' },
+        { toon: 'girl' },
+        { toon: 'bunny' },
+        { glb: M + 'Astronaut.glb', h: 1.6 },
+        { toon: 'alien' },
+        { glb: M + 'Horse.glb', h: 1.5 },
+        { toon: 'boy' },
+        { toon: 'cat' },
+        { glb: M + 'NeilArmstrong.glb', h: 1.7 },
+        { glb: M + 'glTF-Sample-Models/2.0/BrainStem/glTF-Binary/BrainStem.glb', h: 1.7 }
+      ];
+      window.spawnParty = function (sceneEl) {
+        CAST.forEach(function (c, i) {
+          var a = (40 + i * 31) * Math.PI / 180, r = 3;       // نترك فراغاً أمام الطاولة
+          var x = r * Math.sin(a), z = -r * Math.cos(a);
+          var e = document.createElement('a-entity');
+          e.setAttribute('position', x.toFixed(2) + ' 0 ' + z.toFixed(2));
+          e.setAttribute('rotation', '0 ' + (Math.atan2(-x, -z) * 180 / Math.PI).toFixed(1) + ' 0');
+          e.setAttribute('party-dance', 'speed: ' + rnd(1.8, 3).toFixed(2) + '; height: ' + rnd(0.08, 0.16).toFixed(2));
+          if (c.glb) e.setAttribute('glb-dancer', 'src: ' + c.glb + '; height: ' + c.h + '; clip: ' + (c.clip || ''));
+          else e.setAttribute('toon', 'type: ' + c.toon);
+          sceneEl.appendChild(e);
+        });
+      };
     }
   </script>
 </head>
@@ -157,18 +379,23 @@
 <body>
   <div id="xr-panel">
     <div>انقر على الزر أو في أي مكان على الشاشة للدخول إلى وضع VR</div>
-    <div class="help">اليد اليسرى: اقرص (إبهام + سبابة) وأنت تنظر لتمشي. اليد اليمنى: اقرص قرب كرة لتمسكها، وافتح أصابعك لترميها.</div>
+    <div class="help">اقرص (إبهام + سبابة) قرب كرة لتمسكها وافتح أصابعك لترميها. اقرص بعيداً عن الكرات لتمشي باتجاه نظرك.</div>
     <button id="xr-btn" type="button">الدخول إلى VR</button>
     <div id="xr-status">جارٍ فحص دعم WebXR...</div>
   </div>
 
-  <a-scene background="color: #0f172a"
+  <a-scene background="color: #0b1020"
            webxr="requiredFeatures: local-floor; optionalFeatures: bounded-floor, hand-tracking"
            cursor="rayOrigin: mouse"
            raycaster="objects: .clickable">
 
-    <a-entity light="type: ambient; color: #ffffff; intensity: 0.6"></a-entity>
-    <a-entity light="type: directional; color: #ffffff; intensity: 0.8" position="2 4 2"></a-entity>
+    <!-- إضاءة خافتة + أضواء ديسكو ملونة تدور -->
+    <a-entity light="type: ambient; color: #ffffff; intensity: 0.45"></a-entity>
+    <a-entity position="0 3 0" animation="property: rotation; to: 0 360 0; loop: true; dur: 8000; easing: linear">
+      <a-entity light="type: point; color: #ff2d95; intensity: 1.3; distance: 9" position="2.4 0 0"></a-entity>
+      <a-entity light="type: point; color: #22d3ee; intensity: 1.3; distance: 9" position="-1.2 0.4 2.1"></a-entity>
+      <a-entity light="type: point; color: #facc15; intensity: 1.3; distance: 9" position="-1.2 -0.4 -2.1"></a-entity>
+    </a-entity>
 
     <!-- الغرفة -->
     <a-plane position="0 0 0" rotation="-90 0 0" width="8" height="8" color="#8d6e63"></a-plane>
@@ -178,21 +405,26 @@
     <a-plane position="-4 2 0" rotation="0 90 0" width="8" height="4" color="#94a3b8"></a-plane>
     <a-plane position="4 2 0" rotation="0 -90 0" width="8" height="4" color="#94a3b8"></a-plane>
 
-    <!-- الطاولة -->
-    <a-box position="0 0.5 -3" width="1.5" height="1" depth="1.5" color="#4e3629"></a-box>
+    <!-- كرة الديسكو في منتصف السقف -->
+    <a-cylinder position="0 3.875 0" radius="0.01" height="0.25" color="#9ca3af"></a-cylinder>
+    <a-sphere position="0 3.4 0" radius="0.35" segments-width="14" segments-height="10"
+              material="color: #e5e7eb; metalness: 0.6; roughness: 0.2; flatShading: true; emissive: #222222"
+              animation="property: rotation; to: 0 360 0; loop: true; dur: 6000; easing: linear"></a-sphere>
 
-    <!-- الكرات (القطر 0.24م) -->
+    <!-- القصاصات الورقية -->
+    <a-entity confetti="count: 180"></a-entity>
+
+    <!-- الطاولة والكرات -->
+    <a-box position="0 0.5 -3" width="1.5" height="1" depth="1.5" color="#4e3629"></a-box>
     <a-sphere class="clickable" radius="0.12" position="-0.4 1.2 -3.3" throwable="start: 0"></a-sphere>
     <a-sphere class="clickable" radius="0.12" position="0.4 1.2 -3.3" throwable="start: 2"></a-sphere>
     <a-sphere class="clickable" radius="0.12" position="0 1.2 -3" throwable="start: 4"></a-sphere>
     <a-sphere class="clickable" radius="0.12" position="-0.4 1.2 -2.7" throwable="start: 5"></a-sphere>
     <a-sphere class="clickable" radius="0.12" position="0.4 1.2 -2.7" throwable="start: 6"></a-sphere>
 
-    <!-- منصة اللاعب: الكاميرا + اليدان (بدون أذرع تحكم) -->
-    <a-entity id="rig" position="0 0 0">
+    <!-- منصة اللاعب: الكاميرا (اليدان تُرسمان بواسطة hand-rig) -->
+    <a-entity id="rig" position="0 0 0" hand-rig>
       <a-camera look-controls wasd-controls></a-camera>
-      <a-entity hand-tracking-controls="hand: left; modelStyle: dots; modelColor: #ffcfa8" pinch-actions="role: walk"></a-entity>
-      <a-entity hand-tracking-controls="hand: right; modelStyle: dots; modelColor: #ffcfa8" pinch-actions="role: grab"></a-entity>
     </a-entity>
   </a-scene>
 
@@ -213,6 +445,8 @@
       var rigEl = document.getElementById('rig');
       var xrSupported = false, tapUsed = false, entering = false;
       var mode = 'floor';   // 'floor' = local-floor | 'local' = وضع التوافق
+
+      window.spawnParty(sceneEl);
 
       function checkSupport() {
         if (!window.isSecureContext) { say('الصفحة غير آمنة. WebXR تعمل فقط عبر HTTPS أو localhost.'); return; }
