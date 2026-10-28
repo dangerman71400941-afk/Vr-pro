@@ -16,7 +16,7 @@
     html, body { margin: 0; height: 100%; background: #0f172a; }
     #xr-panel {
       position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
-      z-index: 9999; width: min(92vw, 440px); padding: 14px 16px; border-radius: 12px;
+      z-index: 9999; width: min(92vw, 460px); padding: 14px 16px; border-radius: 12px;
       background: rgba(15, 23, 42, .88); color: #f8fafc; direction: rtl; text-align: center;
       font: 15px/1.6 system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif;
     }
@@ -26,7 +26,7 @@
     }
     #xr-btn:disabled { opacity: .5; cursor: not-allowed; }
     #xr-status { margin-top: 8px; font-size: 13px; color: #cbd5e1; word-break: break-word; }
-    .help { font-size: 13px; color: #e2e8f0; }
+    .help { font-size: 13px; color: #e2e8f0; text-align: right; }
   </style>
 
   <script>
@@ -39,30 +39,76 @@
       var THREE = AFRAME.THREE;
       var COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'indigo', 'violet'];
       var rnd = function (a, b) { return a + Math.random() * (b - a); };
+      var clamp = function (x, a, b) { return Math.max(a, Math.min(b, x)); };
 
-      /* ---------- كرة قابلة للإمساك والرمي (فيزياء بسيطة) ---------- */
+      /* ---------- الطاولة الحجرية: صندوقان صلبان (سطح + قاعدة) ---------- */
+      var BOXES = [
+        { min: new THREE.Vector3(-1, 0.86, -0.6), max: new THREE.Vector3(1, 1, 0.6) },     // السطح
+        { min: new THREE.Vector3(-0.35, 0, -0.25), max: new THREE.Vector3(0.35, 0.86, 0.25) } // القاعدة
+      ];
+      var _c = new THREE.Vector3(), _n = new THREE.Vector3();
+
+      // يدفع كرة (مركز p ونصف قطر r) خارج الصناديق، وينعكس v إن وُجد. يعيد true إن كانت ملامسة من الأعلى.
+      function pushOut(p, r, v, e) {
+        var grounded = false;
+        BOXES.forEach(function (b) {
+          _c.set(clamp(p.x, b.min.x, b.max.x), clamp(p.y, b.min.y, b.max.y), clamp(p.z, b.min.z, b.max.z));
+          _n.copy(p).sub(_c);
+          var d = _n.length();
+          if (d >= r) return;
+          if (d > 1e-5) {
+            _n.divideScalar(d);
+            p.addScaledVector(_n, r - d);
+          } else {                               // المركز داخل الصندوق: اخرج من أقرب وجه
+            var f = [[p.x - b.min.x, -1, 0, 0], [b.max.x - p.x, 1, 0, 0], [p.y - b.min.y, 0, -1, 0],
+                     [b.max.y - p.y, 0, 1, 0], [p.z - b.min.z, 0, 0, -1], [b.max.z - p.z, 0, 0, 1]];
+            var m = f[0];
+            f.forEach(function (q) { if (q[0] < m[0]) m = q; });
+            _n.set(m[1], m[2], m[3]);
+            p.addScaledVector(_n, m[0] + r);
+          }
+          if (v) { var vn = v.dot(_n); if (vn < 0) v.addScaledVector(_n, -(1 + e) * vn); }
+          if (_n.y > 0.7) grounded = true;
+        });
+        return grounded;
+      }
+      // يمنع المنصة (اللاعب) من المشي داخل الطاولة
+      function keepOutOfTable(pos) {
+        var X = 1.4, Z = 1.0;
+        if (Math.abs(pos.x) < X && Math.abs(pos.z) < Z) {
+          var o = [[pos.x + X, -1, 0], [X - pos.x, 1, 0], [pos.z + Z, 0, -1], [Z - pos.z, 0, 1]], m = o[0];
+          o.forEach(function (q) { if (q[0] < m[0]) m = q; });
+          pos.x += m[1] * m[0]; pos.z += m[2] * m[0];
+        }
+      }
+
+      /* ---------- أجسام قابلة للإمساك والرمي (كرات + المسدس) ---------- */
       AFRAME.registerComponent('throwable', {
-        schema: { start: { default: 0 }, radius: { default: 0.12 } },
+        schema: { start: { default: 0 }, radius: { default: 0.12 }, gun: { default: false } },
         init: function () {
           var self = this;
           this.v = new THREE.Vector3();
           this.held = false;
           this.i = this.data.start % COLORS.length;
-          this.paint();
-          this.el.addEventListener('click', function () { self.next(); });
+          if (!this.data.gun) {
+            this.paint();
+            this.el.addEventListener('click', function () { self.next(); });
+          }
         },
         paint: function () { this.el.setAttribute('material', 'color', COLORS[this.i]); },
-        next: function () { this.i = (this.i + 1) % COLORS.length; this.paint(); },
+        next: function () {
+          if (this.data.gun) return;
+          this.i = (this.i + 1) % COLORS.length;
+          this.paint();
+        },
         tick: function (t, dt) {
           if (this.held) return;
           dt = Math.min(dt, 50) / 1000;
-          var p = this.el.object3D.position, v = this.v, r = this.data.radius, grounded = false;
+          var p = this.el.object3D.position, v = this.v, r = this.data.radius;
           v.y -= 9.8 * dt;
           p.addScaledVector(v, dt);
-          if (Math.abs(p.x) < 0.75 && Math.abs(p.z + 3) < 0.75 && p.y - r < 1 && p.y - r > 0.8 && v.y < 0) {
-            p.y = 1 + r; v.y *= -0.4; grounded = true;       // سطح الطاولة
-          }
-          if (p.y < r) { p.y = r; v.y *= -0.6; grounded = true; }   // الأرضية
+          var grounded = pushOut(p, r, v, 0.4);
+          if (p.y < r) { p.y = r; v.y *= -0.6; grounded = true; }
           if (grounded && Math.abs(v.y) < 0.4) v.y = 0;
           if (grounded) { var f = Math.max(0, 1 - 1.5 * dt); v.x *= f; v.z *= f; }
           if (p.y > 4 - r) { p.y = 4 - r; v.y *= -0.5; }
@@ -74,43 +120,75 @@
         }
       });
 
-      /* ---------- اليدان: رسم المفاصل من بيانات WebXR مباشرة + قرصة ----------
-         المواضع تُقرأ من XRFrame وتُحوَّل إلى إحداثيات العالم عبر المنصة #rig،
-         وهي نفس الإحداثيات المستخدمة في الإمساك، فيتطابق الشكل مع يدك الحقيقية. */
+      /* ---------- القفازات السوداء + التفاعل ----------
+         الإيماءات:
+         - إمساك: قرصة (إبهام + سبابة) بشرط أن يبقى الوسطى مفتوحاً، تُثبَّت 0.12 ثانية.
+         - جذب (Gravity Gloves): يد مفتوحة موجّهة نحو جسم (يتوهج)، ثم اسحب يدك نحوك بسرعة.
+         - مشي: قبضة مغلقة لمدة 0.4 ثانية، تمشي باتجاه نظرك.
+         - إطلاق الليزر: مسدس في يد، وقرصة باليد الأخرى بعيداً عن الأجسام.
+         - لمس الشخصيات: أنهِ إصبعك السبابة داخل جسمها. */
+      var FWD = new THREE.Vector3(0, 0, -1), UP = new THREE.Vector3(0, 1, 0);
+      var WHITE = new THREE.Color(1, 1, 1);
+
       AFRAME.registerComponent('hand-rig', {
         init: function () {
           this.geo = new THREE.SphereGeometry(1, 8, 6);
-          this.mat = new THREE.MeshBasicMaterial({ color: 0xffcfa8 });
+          this.mat = new THREE.MeshStandardMaterial({ color: 0x151515, roughness: 0.45, metalness: 0.3 });
           this.hands = {};
+          this.cam = new THREE.Vector3();
           this.dir = new THREE.Vector3();
+          this.aim = new THREE.Vector3();
+          this.toHead = new THREE.Vector3();
+          this.vel = new THREE.Vector3();
+          this.tmp = new THREE.Vector3();
+          this.sph = new THREE.Sphere();
+          this.box3 = new THREE.Box3();
+          this.lastFire = 0;
+          this.beamUntil = 0;
+          this.sparkT = 0;
+          var sc = this.el.sceneEl.object3D;
+          this.beam = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 1, 6), new THREE.MeshBasicMaterial({ color: 0xff2244 }));
+          this.spark = new THREE.Mesh(new THREE.SphereGeometry(1, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffee88, transparent: true }));
+          this.beam.visible = this.spark.visible = false;
+          sc.add(this.beam); sc.add(this.spark);
         },
         getHand: function (key) {
           var h = this.hands[key];
           if (!h) {
-            h = this.hands[key] = { group: new THREE.Group(), meshes: {}, mid: new THREE.Vector3(),
-                                    pinching: false, walking: false, held: null, hist: [] };
+            h = this.hands[key] = { group: new THREE.Group(), meshes: {}, mid: new THREE.Vector3(), axis: new THREE.Vector3(),
+              prevW: new THREE.Vector3(), prevT: 0, hv: new THREE.Vector3(), pinching: false, pSince: 0, fSince: 0,
+              walking: false, held: null, hist: [], target: null, lastPull: 0, touch: {} };
             this.el.sceneEl.object3D.add(h.group);
           }
           return h;
         },
+        glow: function (el, on) {
+          el.object3D.traverse(function (n) {
+            if (!n.isMesh || !n.material || !n.material.emissive) return;
+            var m = n.material;
+            if (!m.userData.e0) m.userData.e0 = m.emissive.clone();
+            m.emissive.copy(m.userData.e0);
+            if (on) m.emissive.add(new THREE.Color(0.3, 0.3, 0.3));
+          });
+        },
         grab: function (h) {
-          var best = null, bestD = 0.2, tmp = new THREE.Vector3();
+          var best = null, bestD = 0.2, tmp = this.tmp;
           document.querySelectorAll('[throwable]').forEach(function (b) {
-            var c = b.components.throwable;
-            if (c.held) return;
-            var d = b.object3D.getWorldPosition(tmp).distanceTo(h.mid);
+            if (b.components.throwable.held) return;
+            var d = b.object3D.position.distanceTo(h.mid);
             if (d < bestD) { bestD = d; best = b; }
           });
           if (!best) return false;
           h.held = best;
-          best.components.throwable.held = true;
-          best.components.throwable.v.set(0, 0, 0);
-          best.components.throwable.next();
+          var c = best.components.throwable;
+          c.held = true; c.v.set(0, 0, 0); c.next();
           h.hist = [];
           return true;
         },
         drag: function (h) {
-          h.held.object3D.position.copy(h.mid);
+          var o = h.held.object3D;
+          o.position.copy(h.mid);
+          if (h.held.components.throwable.data.gun) o.quaternion.setFromUnitVectors(FWD, h.axis);
           h.hist.push({ t: performance.now(), p: h.mid.clone() });
           while (h.hist.length > 2 && performance.now() - h.hist[0].t > 120) h.hist.shift();
         },
@@ -121,14 +199,93 @@
             c.v.copy(b.p).sub(a.p).divideScalar((b.t - a.t) / 1000).multiplyScalar(1.2);
             if (c.v.length() > 12) c.v.setLength(12);
           }
-          c.held = false;
-          h.held = null;
-          h.hist = [];
+          c.held = false; h.held = null; h.hist = [];
+        },
+        pull: function (el, wp, dir) {
+          var c = el.components.throwable, t = 0.75;
+          var palm = wp.clone().addScaledVector(dir, 0.12);
+          c.v.copy(palm).sub(el.object3D.position).divideScalar(t);
+          c.v.y += 0.5 * 9.8 * t;
+          if (c.v.length() > 11) c.v.setLength(11);
+        },
+        beep: function () {
+          try {
+            var A = window.AudioContext || window.webkitAudioContext;
+            if (!A) return;
+            var c = this.ac || (this.ac = new A());
+            if (c.state === 'suspended') c.resume();
+            var o = c.createOscillator(), g = c.createGain(), n = c.currentTime;
+            o.type = 'sawtooth';
+            o.frequency.setValueAtTime(900, n);
+            o.frequency.exponentialRampToValueAtTime(120, n + 0.15);
+            g.gain.setValueAtTime(0.12, n);
+            g.gain.exponentialRampToValueAtTime(0.001, n + 0.16);
+            o.connect(g); g.connect(c.destination);
+            o.start(); o.stop(n + 0.17);
+          } catch (e) {}
+        },
+        fire: function (gun) {
+          var now = performance.now();
+          if (now - this.lastFire < 250) return;
+          this.lastFire = now;
+          var self = this, o = gun.object3D;
+          var dir = FWD.clone().applyQuaternion(o.quaternion);
+          var org = new THREE.Vector3(0, 0.005, -0.26).applyQuaternion(o.quaternion).add(o.position);
+          var ray = new THREE.Ray(org, dir), best = 8, hit = null, pt = new THREE.Vector3();
+
+          document.querySelectorAll('[party-dance]').forEach(function (ce) {
+            var c = ce.components['party-dance'], d = c && c.rayHit(ray);
+            if (d !== null && d !== undefined && d < best) { best = d; hit = { t: 'char', c: c }; }
+          });
+          document.querySelectorAll('[throwable]').forEach(function (b) {
+            if (b === gun) return;
+            self.sph.center.copy(b.object3D.position); self.sph.radius = 0.14;
+            if (ray.intersectSphere(self.sph, pt)) {
+              var d = org.distanceTo(pt);
+              if (d < best) { best = d; hit = { t: 'ball', el: b }; }
+            }
+          });
+          BOXES.forEach(function (b) {
+            self.box3.min.copy(b.min); self.box3.max.copy(b.max);
+            if (ray.intersectBox(self.box3, pt)) {
+              var d = org.distanceTo(pt);
+              if (d < best) { best = d; hit = { t: 'table' }; }
+            }
+          });
+
+          var end = org.clone().addScaledVector(dir, best);
+          this.beam.position.copy(org).add(end).multiplyScalar(0.5);
+          this.beam.quaternion.setFromUnitVectors(UP, dir);
+          this.beam.scale.set(1, best, 1);
+          this.beam.visible = true;
+          this.beamUntil = now + 110;
+          this.beep();
+
+          if (hit) {
+            this.spark.position.copy(end);
+            this.sparkT = 1;
+            this.spark.visible = true;
+            if (hit.t === 'char') hit.c.zap();
+            else if (hit.t === 'ball') {
+              var tc = hit.el.components.throwable;
+              if (!tc.held) tc.v.addScaledVector(dir, 4);
+              tc.next();
+            }
+          }
         },
         tick: function (t, dt) {
           var self = this, scene = this.el.sceneEl, frame = scene.frame;
-          var xr = scene.renderer && scene.renderer.xr;
-          var rig = this.el.object3D, seen = {};
+          var xr = scene.renderer && scene.renderer.xr, rig = this.el.object3D, seen = {}, now = performance.now();
+
+          // تأثيرات الليزر (الشعاع والشرارة)
+          if (this.beam.visible && now > this.beamUntil) this.beam.visible = false;
+          if (this.sparkT > 0) {
+            this.sparkT -= Math.min(dt, 50) / 250;
+            var s = 0.02 + (1 - Math.max(this.sparkT, 0)) * 0.1;
+            this.spark.scale.setScalar(s);
+            this.spark.material.opacity = Math.max(this.sparkT, 0);
+            if (this.sparkT <= 0) this.spark.visible = false;
+          }
 
           if (!xr || !frame || !xr.isPresenting) {
             for (var k in this.hands) this.hands[k].group.visible = false;
@@ -137,6 +294,8 @@
           var session = xr.getSession(), ref = xr.getReferenceSpace();
           if (!session || !ref) return;
           rig.updateWorldMatrix(true, false);
+          scene.camera.getWorldPosition(this.cam);
+          var chars = document.querySelectorAll('[party-dance]');
 
           session.inputSources.forEach(function (src) {
             if (!src.hand) return;
@@ -153,46 +312,111 @@
               var p = pose.transform.position;
               m.position.set(p.x, p.y, p.z);
               rig.localToWorld(m.position);
-              m.scale.setScalar(Math.max(pose.radius || 0.008, 0.006));
+              var r = Math.max(pose.radius || 0.008, 0.006) * 1.5;   // سماكة القفاز
+              m.scale.setScalar(r);
+              pushOut(m.position, r, null, 0);                       // اليد لا تخترق الطاولة
             });
 
-            var th = h.meshes['thumb-tip'], ix = h.meshes['index-finger-tip'];
-            if (!th || !ix || !th.visible || !ix.visible) return;
-            var d = th.position.distanceTo(ix.position);
-            h.mid.copy(th.position).add(ix.position).multiplyScalar(0.5);
-            if (!h.pinching && d < 0.03) {
-              h.pinching = true;
-              h.walking = !self.grab(h);          // قرصة قرب كرة = إمساك، وإلا = مشي
-            } else if (h.pinching && d > 0.055) {
-              h.pinching = false; h.walking = false;
-              self.release(h);
-            }
+            var J = h.meshes, W = J['wrist'], TT = J['thumb-tip'], IT = J['index-finger-tip'], MT = J['middle-finger-tip'],
+                RT = J['ring-finger-tip'], LT = J['little-finger-tip'], MP = J['middle-finger-phalanx-proximal'];
+            var all = [W, TT, IT, MT, RT, LT, MP];
+            for (var i = 0; i < all.length; i++) if (!all[i] || !all[i].visible) return;
+
+            var wp = W.position;
+            var dM = wp.distanceTo(MT.position);
+            var avg = (wp.distanceTo(IT.position) + dM + wp.distanceTo(RT.position) + wp.distanceTo(LT.position)) / 4;
+            var open = avg > 0.13, fist = avg < 0.09;
+            h.axis.copy(MP.position).sub(wp).normalize();
+            h.mid.copy(TT.position).add(IT.position).multiplyScalar(0.5);
+
+            // قرصة بنية واضحة: مسافة صغيرة + الوسطى غير مغلقة + ثبات 0.12 ثانية
+            var d = TT.position.distanceTo(IT.position);
+            if (!h.pinching) {
+              if (d < 0.025 && dM > 0.1) {
+                if (!h.pSince) h.pSince = now;
+                else if (now - h.pSince > 120) {
+                  h.pinching = true; h.pSince = 0;
+                  if (!self.grab(h)) {                               // لا جسم قريب: ربما إطلاق ليزر
+                    var other = self.hands[key === 'left' ? 'right' : 'left'];
+                    if (other && other.held && other.held.components.throwable.data.gun) self.fire(other.held);
+                  }
+                }
+              } else h.pSince = 0;
+            } else if (d > 0.05) { h.pinching = false; self.release(h); }
             if (h.pinching && h.held) self.drag(h);
+
+            // مشي: قبضة مغلقة 0.4 ثانية
+            if (fist && !h.pinching) { if (!h.fSince) h.fSince = now; } else h.fSince = 0;
+            h.walking = !!h.fSince && now - h.fSince > 400;
+
+            // جذب الأجسام (Gravity Gloves): يد مفتوحة موجّهة نحو جسم
+            self.aim.copy(MT.position).sub(wp).normalize();
+            var tgt = null;
+            if (open && !h.held) {
+              var bestC = 0.985;
+              document.querySelectorAll('[throwable]').forEach(function (b) {
+                if (b.components.throwable.held) return;
+                self.tmp.copy(b.object3D.position).sub(wp);
+                var L = self.tmp.length();
+                if (L < 0.3 || L > 7) return;
+                var c = self.tmp.dot(self.aim) / L;
+                if (c > bestC) { bestC = c; tgt = b; }
+              });
+            }
+            if (h.target !== tgt) {
+              if (h.target) self.glow(h.target, false);
+              if (tgt) self.glow(tgt, true);
+              h.target = tgt;
+            }
+            if (h.prevT) {
+              self.vel.copy(wp).sub(h.prevW).divideScalar(Math.max(0.001, (now - h.prevT) / 1000));
+              h.hv.lerp(self.vel, 0.5);
+            }
+            h.prevW.copy(wp); h.prevT = now;
+            if (tgt) {
+              self.toHead.copy(self.cam).sub(wp).normalize();
+              if (h.hv.dot(self.toHead) > 1.6 && now - h.lastPull > 800) {   // سحب سريع نحوك
+                h.lastPull = now;
+                self.pull(tgt, wp, self.aim);
+              }
+            }
+
+            // لمس الشخصيات بالسبابة
+            chars.forEach(function (ce) {
+              var c = ce.components['party-dance'];
+              if (!c) return;
+              var id = ce.object3D.id, hit = c.hit(IT.position, 0.02);
+              if (hit && !h.touch[id]) c.poke();
+              h.touch[id] = hit;
+            });
           });
 
           for (var key in this.hands) {
             var hh = this.hands[key];
             if (!seen[key]) {
               hh.group.visible = false;
-              if (hh.pinching) { hh.pinching = false; hh.walking = false; this.release(hh); }
+              hh.walking = false; hh.fSince = 0; hh.pSince = 0;
+              if (hh.pinching) { hh.pinching = false; this.release(hh); }
+              if (hh.target) { this.glow(hh.target, false); hh.target = null; }
             }
           }
 
-          var L = this.hands.left, R = this.hands.right;
-          if ((L && L.walking) || (R && R.walking)) {
+          var Lh = this.hands.left, Rh = this.hands.right;
+          if ((Lh && Lh.walking) || (Rh && Rh.walking)) {
             scene.camera.getWorldDirection(this.dir);
             this.dir.y = 0;
             if (this.dir.lengthSq() > 1e-6) {
               this.dir.normalize();
-              rig.position.addScaledVector(this.dir, 1.6 * Math.min(dt, 50) / 1000);
-              rig.position.x = Math.max(-3.4, Math.min(3.4, rig.position.x));
-              rig.position.z = Math.max(-3.4, Math.min(3.4, rig.position.z));
+              rig.position.addScaledVector(this.dir, 1.4 * Math.min(dt, 50) / 1000);
+              rig.position.x = clamp(rig.position.x, -3.4, 3.4);
+              rig.position.z = clamp(rig.position.z, -3.4, 3.4);
+              keepOutOfTable(rig.position);
             }
           }
         }
       });
 
-      /* ---------- قصاصات ورقية متساقطة (InstancedMesh واحد) ---------- */
+      /* ---------- قصاصات ورقية متساقطة ---------- */
       AFRAME.registerComponent('confetti', {
         schema: { count: { default: 180 } },
         init: function () {
@@ -227,21 +451,66 @@
         }
       });
 
-      /* ---------- رقص: قفز + تمايل لكل شخصية ---------- */
+      /* ---------- شخصية راقصة: رقص + حدود لمس + انحناء عند اللمس + رد فعل لليزر ---------- */
+      var RED = new THREE.Color(1, 0.15, 0.3);
+      var SPHERES = [[0.22, 0.2], [0.52, 0.22], [0.85, 0.18]];   // [ارتفاع, نصف قطر] كنسبة من الطول
       AFRAME.registerComponent('party-dance', {
-        schema: { height: { default: 0.12 }, speed: { default: 2.2 }, sway: { default: 22 } },
-        init: function () { this.ph = Math.random() * 6.28; },
-        tick: function (t) {
-          var o = this.el.object3D;
-          if (!this.base) { this.base = o.position.clone(); this.yaw = o.rotation.y; }
-          var s = t / 1000 * this.data.speed + this.ph;
-          o.position.y = this.base.y + Math.abs(Math.sin(s)) * this.data.height;
-          o.rotation.y = this.yaw + Math.sin(s * 0.5) * THREE.MathUtils.degToRad(this.data.sway);
-          o.rotation.z = Math.sin(s) * 0.05;
+        schema: { height: { default: 0.12 }, speed: { default: 2.2 }, sway: { default: 22 }, h: { default: 1.5 } },
+        init: function () {
+          this.ph = Math.random() * 6.28;
+          this.bow = 0; this.zapT = 0; this.flashed = false;
+          this._v = new THREE.Vector3();
+          this._s = new THREE.Sphere();
+          this._p = new THREE.Vector3();
+        },
+        poke: function () { this.bow = 1; },
+        zap: function () { this.zapT = 1; this.bow = Math.max(this.bow, 0.5); },
+        hit: function (p, r) {
+          var o = this.el.object3D, h = this.data.h, v = this._v;
+          for (var i = 0; i < SPHERES.length; i++) {
+            v.set(0, SPHERES[i][0] * h, 0);
+            o.localToWorld(v);
+            if (v.distanceTo(p) < SPHERES[i][1] * h + r) return true;
+          }
+          return false;
+        },
+        rayHit: function (ray) {
+          var o = this.el.object3D, h = this.data.h, best = null;
+          for (var i = 0; i < SPHERES.length; i++) {
+            this._s.center.set(0, SPHERES[i][0] * h, 0);
+            o.localToWorld(this._s.center);
+            this._s.radius = SPHERES[i][1] * h;
+            if (ray.intersectSphere(this._s, this._p)) {
+              var d = ray.origin.distanceTo(this._p);
+              if (best === null || d < best) best = d;
+            }
+          }
+          return best;
+        },
+        flash: function (k) {
+          this.el.object3D.traverse(function (n) {
+            if (!n.isMesh || !n.material || !n.material.emissive) return;
+            var m = n.material;
+            if (!m.userData.e0) m.userData.e0 = m.emissive.clone();
+            m.emissive.copy(m.userData.e0).lerp(RED, k);
+          });
+        },
+        tick: function (t, dt) {
+          var o = this.el.object3D, d = this.data, s = Math.min(dt, 50) / 1000;
+          if (!this.base) { o.rotation.order = 'YXZ'; this.base = o.position.clone(); this.yaw = o.rotation.y; }
+          var ph = t / 1000 * d.speed + this.ph;
+          this.bow *= Math.exp(-3.5 * s);
+          this.zapT *= Math.exp(-4 * s);
+          o.position.set(this.base.x + (Math.random() - 0.5) * 0.08 * this.zapT,
+                         this.base.y + Math.abs(Math.sin(ph)) * d.height + this.zapT * 0.12,
+                         this.base.z + (Math.random() - 0.5) * 0.08 * this.zapT);
+          o.rotation.set(this.bow * 0.5, this.yaw + Math.sin(ph * 0.5) * THREE.MathUtils.degToRad(d.sway), Math.sin(ph) * 0.05);
+          o.scale.y = 1 - this.bow * 0.06;
+          if (this.zapT > 0.02 || this.flashed) { this.flash(this.zapT); this.flashed = this.zapT > 0.02; }
         }
       });
 
-      /* ---------- نموذج GLB: تحجيم تلقائي + تشغيل حركة النموذج إن وُجدت ---------- */
+      /* ---------- نموذج GLB: تحجيم تلقائي + تشغيل حركته إن وُجدت ---------- */
       AFRAME.registerComponent('glb-dancer', {
         schema: { src: { type: 'string' }, height: { default: 1.5 }, clip: { default: '' } },
         init: function () {
@@ -256,7 +525,7 @@
             var s = d.height / (size.y || 1);
             var baseY = el.object3D.position.y;
             m.scale.multiplyScalar(s);
-            m.position.y -= (box.min.y - baseY) * s;      // القاعدة على الأرض
+            m.position.y -= (box.min.y - baseY) * s;
             var clips = m.animations || [];
             var clip = clips.filter(function (c) { return d.clip && c.name.toLowerCase().indexOf(d.clip.toLowerCase()) >= 0; })[0] || clips[0];
             if (clip) { self.mixer = new THREE.AnimationMixer(m); self.mixer.clipAction(clip).play(); }
@@ -266,7 +535,7 @@
         tick: function (t, dt) { if (this.mixer) this.mixer.update(Math.min(dt, 50) / 1000); }
       });
 
-      /* ---------- شخصيات مبنية من مجسمات بسيطة (فضائي، أرنب، قطة، أنمي) ---------- */
+      /* ---------- شخصيات مبنية من مجسمات بسيطة ---------- */
       var mk = function (p, tag, a) {
         var e = document.createElement(tag);
         for (var k in a) e.setAttribute(k, a[k]);
@@ -345,7 +614,7 @@
         init: function () { BUILD[this.data.type](this.el); }
       });
 
-      /* ---------- الحفلة: عشر شخصيات موزعة على حلقة داخل الغرفة ---------- */
+      /* ---------- الحفلة: عشر شخصيات على حلقة حول الطاولة ---------- */
       var M = 'https://modelviewer.dev/shared-assets/models/';
       var CAST = [
         { glb: M + 'RobotExpressive.glb', h: 1.5, clip: 'Dance' },
@@ -361,12 +630,12 @@
       ];
       window.spawnParty = function (sceneEl) {
         CAST.forEach(function (c, i) {
-          var a = (40 + i * 31) * Math.PI / 180, r = 3;       // نترك فراغاً أمام الطاولة
+          var a = (18 + i * 36) * Math.PI / 180, r = 3.2;
           var x = r * Math.sin(a), z = -r * Math.cos(a);
           var e = document.createElement('a-entity');
           e.setAttribute('position', x.toFixed(2) + ' 0 ' + z.toFixed(2));
           e.setAttribute('rotation', '0 ' + (Math.atan2(-x, -z) * 180 / Math.PI).toFixed(1) + ' 0');
-          e.setAttribute('party-dance', 'speed: ' + rnd(1.8, 3).toFixed(2) + '; height: ' + rnd(0.08, 0.16).toFixed(2));
+          e.setAttribute('party-dance', 'speed: ' + rnd(1.8, 3).toFixed(2) + '; height: ' + rnd(0.08, 0.16).toFixed(2) + '; h: ' + (c.h || 1.4));
           if (c.glb) e.setAttribute('glb-dancer', 'src: ' + c.glb + '; height: ' + c.h + '; clip: ' + (c.clip || ''));
           else e.setAttribute('toon', 'type: ' + c.toon);
           sceneEl.appendChild(e);
@@ -379,7 +648,13 @@
 <body>
   <div id="xr-panel">
     <div>انقر على الزر أو في أي مكان على الشاشة للدخول إلى وضع VR</div>
-    <div class="help">اقرص (إبهام + سبابة) قرب كرة لتمسكها وافتح أصابعك لترميها. اقرص بعيداً عن الكرات لتمشي باتجاه نظرك.</div>
+    <div class="help">
+      • إمساك: اقرص بالإبهام والسبابة قرب جسم (واترك الوسطى مفتوحة).<br>
+      • جذب: افتح يدك ووجّهها لكرة (تتوهج) ثم اسحب يدك نحوك بسرعة.<br>
+      • مشي: اقبض يدك لمدة 0.4 ثانية.<br>
+      • ليزر: أمسك المسدس بيد، واقرص باليد الأخرى بعيداً عن الأجسام.<br>
+      • المس الشخصيات بإصبعك لتنحني.
+    </div>
     <button id="xr-btn" type="button">الدخول إلى VR</button>
     <div id="xr-status">جارٍ فحص دعم WebXR...</div>
   </div>
@@ -414,16 +689,27 @@
     <!-- القصاصات الورقية -->
     <a-entity confetti="count: 180"></a-entity>
 
-    <!-- الطاولة والكرات -->
-    <a-box position="0 0.5 -3" width="1.5" height="1" depth="1.5" color="#4e3629"></a-box>
-    <a-sphere class="clickable" radius="0.12" position="-0.4 1.2 -3.3" throwable="start: 0"></a-sphere>
-    <a-sphere class="clickable" radius="0.12" position="0.4 1.2 -3.3" throwable="start: 2"></a-sphere>
-    <a-sphere class="clickable" radius="0.12" position="0 1.2 -3" throwable="start: 4"></a-sphere>
-    <a-sphere class="clickable" radius="0.12" position="-0.4 1.2 -2.7" throwable="start: 5"></a-sphere>
-    <a-sphere class="clickable" radius="0.12" position="0.4 1.2 -2.7" throwable="start: 6"></a-sphere>
+    <!-- الطاولة الحجرية الضخمة في منتصف الغرفة (الحدود الفيزيائية معرّفة في BOXES بنفس الأبعاد) -->
+    <a-box position="0 0.93 0" width="2" height="0.14" depth="1.2" material="color: #8b8b8b; roughness: 1; flatShading: true"></a-box>
+    <a-box position="0 0.43 0" width="0.7" height="0.86" depth="0.5" material="color: #6b6b6b; roughness: 1; flatShading: true"></a-box>
 
-    <!-- منصة اللاعب: الكاميرا (اليدان تُرسمان بواسطة hand-rig) -->
-    <a-entity id="rig" position="0 0 0" hand-rig>
+    <!-- الكرات فوق الطاولة -->
+    <a-sphere class="clickable" radius="0.12" position="-0.8 1.2 -0.2" throwable="start: 0"></a-sphere>
+    <a-sphere class="clickable" radius="0.12" position="-0.4 1.2 0.2" throwable="start: 2"></a-sphere>
+    <a-sphere class="clickable" radius="0.12" position="0 1.2 -0.2" throwable="start: 4"></a-sphere>
+    <a-sphere class="clickable" radius="0.12" position="0.4 1.2 0.2" throwable="start: 5"></a-sphere>
+    <a-sphere class="clickable" radius="0.12" position="0.8 1.2 -0.2" throwable="start: 6"></a-sphere>
+
+    <!-- المسدس الليزري (الماسورة باتجاه -Z) -->
+    <a-entity position="0.2 1.15 0.42" throwable="gun: true; radius: 0.09">
+      <a-box width="0.05" height="0.1" depth="0.05" position="0 -0.06 0.04" color="#222222"></a-box>
+      <a-box width="0.06" height="0.07" depth="0.22" color="#4b5563"></a-box>
+      <a-cylinder radius="0.012" height="0.14" rotation="90 0 0" position="0 0.005 -0.17" color="#9ca3af"></a-cylinder>
+      <a-sphere radius="0.02" position="0 0.005 -0.25" material="color: #ff2244; emissive: #ff2244; emissiveIntensity: 2"></a-sphere>
+    </a-entity>
+
+    <!-- منصة اللاعب: تبدأ أمام الطاولة (اليدان تُرسمان بواسطة hand-rig) -->
+    <a-entity id="rig" position="0 0 2.2" hand-rig>
       <a-camera look-controls wasd-controls></a-camera>
     </a-entity>
   </a-scene>
@@ -506,12 +792,12 @@
       sceneEl.addEventListener('enter-vr', function () {
         entering = false;
         panel.style.display = 'none';
-        if (mode === 'local') rigEl.setAttribute('position', '0 1.6 0');
+        rigEl.object3D.position.set(0, mode === 'local' ? 1.6 : 0, 2.2);   // أمام الطاولة
       });
       sceneEl.addEventListener('exit-vr', function () {
         entering = false; tapUsed = false;
         panel.style.display = '';
-        rigEl.setAttribute('position', '0 0 0');
+        rigEl.object3D.position.set(0, 0, 2.2);
       });
 
       checkSupport();
