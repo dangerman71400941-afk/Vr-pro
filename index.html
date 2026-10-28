@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VR Rainbow Ball</title>
+
+  <!-- A-Frame 1.7.1 عبر HTTPS (jsDelivr) مع مصدر احتياطي -->
+  <script src="https://cdn.jsdelivr.net/npm/aframe@1.7.1/dist/aframe.min.js"></script>
+  <script>
+    if (!window.AFRAME) {
+      document.write('<script src="https://aframe.io/releases/1.7.1/aframe.min.js"><\/script>');
+    }
+  </script>
+
+  <style>
+    html, body { margin: 0; height: 100%; background: #0f172a; }
+    #xr-panel {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 9999;
+      width: min(92vw, 420px);
+      padding: 14px 16px;
+      border-radius: 12px;
+      background: rgba(15, 23, 42, 0.88);
+      color: #f8fafc;
+      font: 15px/1.6 system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif;
+      text-align: center;
+      direction: rtl;
+    }
+    #xr-btn {
+      margin-top: 6px;
+      padding: 10px 22px;
+      border: 0;
+      border-radius: 8px;
+      background: #2563eb;
+      color: #fff;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    #xr-btn:disabled { opacity: .5; cursor: not-allowed; }
+    #xr-btn:focus-visible { outline: 3px solid #93c5fd; outline-offset: 2px; }
+    #xr-status { margin-top: 8px; font-size: 13px; color: #cbd5e1; word-break: break-word; }
+  </style>
+
+  <!-- مكوّن ألوان الطيف: كل نقرة تنقل الكرة إلى اللون التالي -->
+  <script>
+    if (window.AFRAME) {
+      AFRAME.registerComponent('rainbow-cycle', {
+        init: function () {
+          var el = this.el;
+          var colors = ['red', 'orange', 'yellow', 'green', 'blue', 'indigo', 'violet'];
+          var currentIndex = 0;
+
+          el.setAttribute('material', 'color', colors[currentIndex]);
+
+          el.addEventListener('click', function () {
+            currentIndex = (currentIndex + 1) % colors.length;
+            el.setAttribute('material', 'color', colors[currentIndex]);
+          });
+        }
+      });
+    }
+
+    // أي خطأ برمجي يظهر في اللوحة بدل شاشة بيضاء صامتة
+    window.addEventListener('error', function (e) {
+      var s = document.getElementById('xr-status');
+      if (s) s.textContent = 'خطأ في الصفحة: ' + (e.message || e);
+    });
+  </script>
+</head>
+
+<body>
+  <div id="xr-panel">
+    <div>انقر على الزر أو في أي مكان على الشاشة للدخول إلى وضع VR</div>
+    <button id="xr-btn" type="button">الدخول إلى VR</button>
+    <div id="xr-status">جارٍ فحص دعم WebXR...</div>
+  </div>
+
+  <a-scene background="color: #0f172a"
+           webxr="requiredFeatures: local-floor; optionalFeatures: bounded-floor"
+           cursor="rayOrigin: mouse"
+           raycaster="objects: .clickable">
+
+    <!-- الإضاءة -->
+    <a-entity light="type: ambient; color: #ffffff; intensity: 0.6"></a-entity>
+    <a-entity light="type: directional; color: #ffffff; intensity: 0.8" position="2 4 2"></a-entity>
+
+    <!-- الغرفة -->
+    <a-plane position="0 0 0" rotation="-90 0 0" width="8" height="8" color="#8d6e63"></a-plane>
+    <a-plane position="0 4 0" rotation="90 0 0" width="8" height="8" color="#e2e8f0"></a-plane>
+    <a-plane position="0 2 -4" width="8" height="4" color="#cbd5e1"></a-plane>
+    <a-plane position="0 2 4" rotation="0 180 0" width="8" height="4" color="#cbd5e1"></a-plane>
+    <a-plane position="-4 2 0" rotation="0 90 0" width="8" height="4" color="#94a3b8"></a-plane>
+    <a-plane position="4 2 0" rotation="0 -90 0" width="8" height="4" color="#94a3b8"></a-plane>
+
+    <!-- الطاولة -->
+    <a-box position="0 0.5 -3" width="1.5" height="1" depth="1.5" color="#4e3629"></a-box>
+
+    <!-- الكرة -->
+    <a-sphere class="clickable"
+              position="0 1.3 -3"
+              radius="0.3"
+              rainbow-cycle
+              animation__scale="property: scale; to: 1.1 1.1 1.1; startEvents: mouseenter; dur: 200"
+              animation__scale_out="property: scale; to: 1 1 1; startEvents: mouseleave; dur: 200">
+    </a-sphere>
+
+    <!-- منصة اللاعب: الكاميرا + أذرع التحكم -->
+    <a-entity id="rig" position="0 0 0">
+      <a-camera look-controls wasd-controls></a-camera>
+      <a-entity laser-controls="hand: right" raycaster="objects: .clickable; far: 10"></a-entity>
+      <a-entity laser-controls="hand: left" raycaster="objects: .clickable; far: 10"></a-entity>
+    </a-entity>
+  </a-scene>
+
+  <script>
+    (function () {
+      var panel    = document.getElementById('xr-panel');
+      var btn      = document.getElementById('xr-btn');
+      var statusEl = document.getElementById('xr-status');
+      function say(msg) { statusEl.textContent = msg; }
+
+      if (!window.AFRAME) {
+        btn.disabled = true;
+        say('تعذّر تحميل مكتبة A-Frame من الإنترنت (jsDelivr وaframe.io). تحقق من الاتصال أو من حظر المواقع ثم أعد تحميل الصفحة.');
+        return;
+      }
+
+      var sceneEl = document.querySelector('a-scene');
+      var rigEl   = document.getElementById('rig');
+      var xrSupported = false;
+      var tapUsed = false;
+      var entering = false;
+
+      // 'floor': مرجع الأرضية local-floor (الأفضل)
+      // 'local': وضع التوافق بلا ميزات مطلوبة، مع رفع المنصة 1.6م يدوياً
+      var mode = 'floor';
+
+      function checkSupport() {
+        if (!window.isSecureContext) {
+          say('الصفحة غير آمنة (' + location.protocol + '//). WebXR تعمل فقط عبر HTTPS أو localhost.');
+          return;
+        }
+        if (!navigator.xr) {
+          say('هذا المتصفح لا يوفّر WebXR.');
+          return;
+        }
+        navigator.xr.isSessionSupported('immersive-vr').then(function (ok) {
+          xrSupported = ok;
+          say(ok ? 'WebXR جاهز. اضغط للدخول.' : 'هذا الجهاز لا يدعم immersive-vr (طبيعي على الكمبيوتر بدون نظارة).');
+        }).catch(function (e) {
+          say('تعذّر فحص WebXR: ' + e.message);
+        });
+      }
+
+      // يعرض السبب الحقيقي (DOMException) وليس رسالة A-Frame العامة فقط
+      function describe(e) {
+        var parts = [];
+        var cur = e, depth = 0;
+        while (cur && depth < 3) {
+          parts.push((cur.name ? cur.name + ': ' : '') + (cur.message || cur));
+          cur = cur.cause;
+          depth++;
+        }
+        return parts.join(' | ');
+      }
+
+      function applyMode() {
+        var xr = sceneEl.systems && sceneEl.systems.webxr;
+        if (mode === 'local') {
+          if (xr) xr.sessionConfiguration = { requiredFeatures: [], optionalFeatures: [] };
+          sceneEl.renderer.xr.setReferenceSpaceType('local');
+        }
+      }
+
+      function onFail(e) {
+        console.error(e);
+        entering = false;
+        tapUsed = false;
+        var text = describe(e);
+
+        // الإعداد القياسي غير مدعوم: انتقل لوضع التوافق وأعد المحاولة مرة واحدة
+        if (mode === 'floor' && /NotSupportedError/.test(text)) {
+          mode = 'local';
+          say('الإعداد القياسي غير مدعوم، جارٍ تجربة وضع التوافق...');
+          enterXR();
+          return;
+        }
+        say('تعذّر الدخول إلى VR (' + mode + '): ' + text + ' — اضغط مرة أخرى للمحاولة.');
+      }
+
+      // يجب أن يُستدعى من داخل حدث نقر حتى يقبله المتصفح (User Activation)
+      function enterXR() {
+        if (entering || sceneEl.is('vr-mode')) return;
+        if (!sceneEl.hasLoaded) { say('المشهد لم يكتمل تحميله بعد، حاول مرة أخرى.'); return; }
+        applyMode();
+        entering = true;
+        try {
+          var p = sceneEl.enterVR();
+          if (p && p.catch) p.catch(onFail);
+        } catch (e) { onFail(e); }
+      }
+
+      btn.addEventListener('click', enterXR);
+
+      // أول نقرة في أي مكان على الشاشة تدخل VR (إن كان مدعوماً)
+      document.addEventListener('click', function (ev) {
+        if (tapUsed || !xrSupported || entering) return;
+        if (ev.target.closest && ev.target.closest('#xr-panel, .a-enter-vr, .a-enter-vr-button')) return;
+        tapUsed = true;
+        enterXR();
+      });
+
+      sceneEl.addEventListener('enter-vr', function () {
+        entering = false;
+        panel.style.display = 'none';
+        if (mode === 'local') rigEl.setAttribute('position', '0 1.6 0');
+      });
+      sceneEl.addEventListener('exit-vr', function () {
+        entering = false;
+        panel.style.display = '';
+        tapUsed = false;
+        rigEl.setAttribute('position', '0 0 0');
+      });
+
+      checkSupport();
+    })();
+  </script>
+</body>
+</html>
