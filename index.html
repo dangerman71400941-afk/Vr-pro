@@ -123,21 +123,46 @@
       /* ---------- القفازات السوداء + التفاعل ----------
          الإيماءات:
          - إمساك: قرصة (إبهام + سبابة) بشرط أن يبقى الوسطى مفتوحاً، تُثبَّت 0.12 ثانية.
-         - جذب (Gravity Gloves): يد مفتوحة موجّهة نحو جسم (يتوهج)، ثم اسحب يدك نحوك بسرعة.
-         - مشي: قبضة مغلقة لمدة 0.4 ثانية، تمشي باتجاه نظرك.
+         - جذب (Gravity Gloves): يد مفتوحة؛ يظهر شعاع توجيه، وعند توجيهه نحو جسم يتوهج.
+           اسحب يدك نحوك بسرعة فيطير الجسم ويستقر في راحة يدك. اقبض يدك لترميه.
+         - مشي: ميلان الرأس للأسفل/الأمام بزاوية أكبر من tiltOn (30° افتراضياً) لمدة 0.3 ثانية،
+           فتمشي باتجاه نظرك؛ وتتوقف عندما تعدّل رأسك (أقل من tiltOff).
+           لا يعمل المشي أثناء الإمساك بجسم أو القرص أو التوجيه نحو هدف.
          - إطلاق الليزر: مسدس في يد، وقرصة باليد الأخرى بعيداً عن الأجسام.
-         - لمس الشخصيات: أنهِ إصبعك السبابة داخل جسمها. */
+         - لمس الشخصيات: أدخل إصبعك السبابة في جسمها. */
       var FWD = new THREE.Vector3(0, 0, -1), UP = new THREE.Vector3(0, 1, 0);
-      var WHITE = new THREE.Color(1, 1, 1);
+
+      // عظام القفاز: [مفصل أ، مفصل ب، معامل السماكة]
+      var BONES = (function () {
+        var b = [], F = ['index-finger', 'middle-finger', 'ring-finger', 'little-finger'];
+        b.push(['wrist', 'thumb-metacarpal', 1.3], ['thumb-metacarpal', 'thumb-phalanx-proximal', 1],
+               ['thumb-phalanx-proximal', 'thumb-phalanx-distal', 1], ['thumb-phalanx-distal', 'thumb-tip', 1]);
+        F.forEach(function (f) {
+          b.push(['wrist', f + '-metacarpal', 1.3], [f + '-metacarpal', f + '-phalanx-proximal', 1],
+                 [f + '-phalanx-proximal', f + '-phalanx-intermediate', 1],
+                 [f + '-phalanx-intermediate', f + '-phalanx-distal', 1], [f + '-phalanx-distal', f + '-tip', 1]);
+        });
+        for (var i = 0; i < F.length - 1; i++) {      // وصلات تملأ راحة اليد
+          b.push([F[i] + '-metacarpal', F[i + 1] + '-metacarpal', 1.9],
+                 [F[i] + '-phalanx-proximal', F[i + 1] + '-phalanx-proximal', 1.7]);
+        }
+        return b;
+      })();
 
       AFRAME.registerComponent('hand-rig', {
+        schema: { tiltOn: { default: 30 }, tiltOff: { default: 20 }, tiltHold: { default: 300 } },
         init: function () {
           this.geo = new THREE.SphereGeometry(1, 8, 6);
+          this.cyl = new THREE.CylinderGeometry(1, 1, 1, 8);
+          this.rayGeo = new THREE.CylinderGeometry(0.004, 0.004, 1, 6);
           this.mat = new THREE.MeshStandardMaterial({ color: 0x151515, roughness: 0.45, metalness: 0.3 });
           this.hands = {};
           this.cam = new THREE.Vector3();
           this.dir = new THREE.Vector3();
+          this.fwd = new THREE.Vector3();
+          this.q = new THREE.Quaternion();
           this.aim = new THREE.Vector3();
+          this.bv = new THREE.Vector3();
           this.toHead = new THREE.Vector3();
           this.vel = new THREE.Vector3();
           this.tmp = new THREE.Vector3();
@@ -146,6 +171,8 @@
           this.lastFire = 0;
           this.beamUntil = 0;
           this.sparkT = 0;
+          this.tilting = false;
+          this.tSince = 0;
           var sc = this.el.sceneEl.object3D;
           this.beam = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 1, 6), new THREE.MeshBasicMaterial({ color: 0xff2244 }));
           this.spark = new THREE.Mesh(new THREE.SphereGeometry(1, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffee88, transparent: true }));
@@ -155,9 +182,12 @@
         getHand: function (key) {
           var h = this.hands[key];
           if (!h) {
-            h = this.hands[key] = { group: new THREE.Group(), meshes: {}, mid: new THREE.Vector3(), axis: new THREE.Vector3(),
-              prevW: new THREE.Vector3(), prevT: 0, hv: new THREE.Vector3(), pinching: false, pSince: 0, fSince: 0,
-              walking: false, held: null, hist: [], target: null, lastPull: 0, touch: {} };
+            h = this.hands[key] = { group: new THREE.Group(), meshes: {}, bones: [], mid: new THREE.Vector3(), axis: new THREE.Vector3(),
+              palm: new THREE.Vector3(), prevW: new THREE.Vector3(), prevT: 0, hv: new THREE.Vector3(), pinching: false, pSince: 0,
+              held: null, caught: false, pulling: null, pullUntil: 0, hist: [], target: null, lastPull: 0, touch: {},
+              ray: new THREE.Mesh(this.rayGeo, new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.4, depthWrite: false })) };
+            h.ray.visible = false;
+            h.group.add(h.ray);
             this.el.sceneEl.object3D.add(h.group);
           }
           return h;
@@ -171,8 +201,24 @@
             if (on) m.emissive.add(new THREE.Color(0.3, 0.3, 0.3));
           });
         },
+        updateBones: function (h) {
+          var self = this, J = h.meshes;
+          BONES.forEach(function (b, i) {
+            var a = J[b[0]], c = J[b[1]], m = h.bones[i];
+            if (!m) { m = h.bones[i] = new THREE.Mesh(self.cyl, self.mat); h.group.add(m); }
+            if (!a || !c || !a.visible || !c.visible) { m.visible = false; return; }
+            self.bv.copy(c.position).sub(a.position);
+            var len = self.bv.length();
+            if (len < 1e-4) { m.visible = false; return; }
+            m.visible = true;
+            m.position.copy(a.position).add(c.position).multiplyScalar(0.5);
+            m.quaternion.setFromUnitVectors(UP, self.bv.divideScalar(len));
+            var r = (a.scale.x + c.scale.x) * 0.5 * b[2];
+            m.scale.set(r, len, r);
+          });
+        },
         grab: function (h) {
-          var best = null, bestD = 0.2, tmp = this.tmp;
+          var best = null, bestD = 0.2;
           document.querySelectorAll('[throwable]').forEach(function (b) {
             if (b.components.throwable.held) return;
             var d = b.object3D.position.distanceTo(h.mid);
@@ -185,11 +231,11 @@
           h.hist = [];
           return true;
         },
-        drag: function (h) {
+        drag: function (h, pos) {
           var o = h.held.object3D;
-          o.position.copy(h.mid);
+          o.position.copy(pos);
           if (h.held.components.throwable.data.gun) o.quaternion.setFromUnitVectors(FWD, h.axis);
-          h.hist.push({ t: performance.now(), p: h.mid.clone() });
+          h.hist.push({ t: performance.now(), p: pos.clone() });
           while (h.hist.length > 2 && performance.now() - h.hist[0].t > 120) h.hist.shift();
         },
         release: function (h) {
@@ -199,14 +245,15 @@
             c.v.copy(b.p).sub(a.p).divideScalar((b.t - a.t) / 1000).multiplyScalar(1.2);
             if (c.v.length() > 12) c.v.setLength(12);
           }
-          c.held = false; h.held = null; h.hist = [];
+          c.held = false; h.held = null; h.caught = false; h.hist = [];
         },
-        pull: function (el, wp, dir) {
+        pull: function (h, el) {
           var c = el.components.throwable, t = 0.75;
-          var palm = wp.clone().addScaledVector(dir, 0.12);
-          c.v.copy(palm).sub(el.object3D.position).divideScalar(t);
+          c.v.copy(h.palm).sub(el.object3D.position).divideScalar(t);
           c.v.y += 0.5 * 9.8 * t;
           if (c.v.length() > 11) c.v.setLength(11);
+          h.pulling = el;
+          h.pullUntil = performance.now() + 1800;
         },
         beep: function () {
           try {
@@ -274,7 +321,7 @@
           }
         },
         tick: function (t, dt) {
-          var self = this, scene = this.el.sceneEl, frame = scene.frame;
+          var self = this, scene = this.el.sceneEl, frame = scene.frame, cfg = this.data;
           var xr = scene.renderer && scene.renderer.xr, rig = this.el.object3D, seen = {}, now = performance.now();
 
           // تأثيرات الليزر (الشعاع والشرارة)
@@ -289,6 +336,7 @@
 
           if (!xr || !frame || !xr.isPresenting) {
             for (var k in this.hands) this.hands[k].group.visible = false;
+            this.tilting = false; this.tSince = 0;
             return;
           }
           var session = xr.getSession(), ref = xr.getReferenceSpace();
@@ -317,17 +365,23 @@
               pushOut(m.position, r, null, 0);                       // اليد لا تخترق الطاولة
             });
 
-            var J = h.meshes, W = J['wrist'], TT = J['thumb-tip'], IT = J['index-finger-tip'], MT = J['middle-finger-tip'],
+            self.updateBones(h);                                     // أصابع وراحة القفاز
+            var J = h.meshes;
+            if (J['wrist']) J['wrist'].scale.multiplyScalar(2.2);    // حافة القفاز عند الرسغ
+
+            var W = J['wrist'], TT = J['thumb-tip'], IT = J['index-finger-tip'], MT = J['middle-finger-tip'],
                 RT = J['ring-finger-tip'], LT = J['little-finger-tip'], MP = J['middle-finger-phalanx-proximal'];
             var all = [W, TT, IT, MT, RT, LT, MP];
-            for (var i = 0; i < all.length; i++) if (!all[i] || !all[i].visible) return;
+            for (var i = 0; i < all.length; i++) if (!all[i] || !all[i].visible) { h.ray.visible = false; return; }
 
             var wp = W.position;
             var dM = wp.distanceTo(MT.position);
             var avg = (wp.distanceTo(IT.position) + dM + wp.distanceTo(RT.position) + wp.distanceTo(LT.position)) / 4;
-            var open = avg > 0.13, fist = avg < 0.09;
+            var open = avg > 0.13;
             h.axis.copy(MP.position).sub(wp).normalize();
             h.mid.copy(TT.position).add(IT.position).multiplyScalar(0.5);
+            self.aim.copy(MT.position).sub(wp).normalize();
+            h.palm.copy(wp).addScaledVector(self.aim, 0.1);
 
             // قرصة بنية واضحة: مسافة صغيرة + الوسطى غير مغلقة + ثبات 0.12 ثانية
             var d = TT.position.distanceTo(IT.position);
@@ -336,24 +390,20 @@
                 if (!h.pSince) h.pSince = now;
                 else if (now - h.pSince > 120) {
                   h.pinching = true; h.pSince = 0;
-                  if (!self.grab(h)) {                               // لا جسم قريب: ربما إطلاق ليزر
+                  if (h.held) h.caught = false;                      // أمسك الجسم المستقر في اليد
+                  else if (!self.grab(h)) {                          // لا جسم قريب: ربما إطلاق ليزر
                     var other = self.hands[key === 'left' ? 'right' : 'left'];
                     if (other && other.held && other.held.components.throwable.data.gun) self.fire(other.held);
                   }
                 }
               } else h.pSince = 0;
             } else if (d > 0.05) { h.pinching = false; self.release(h); }
-            if (h.pinching && h.held) self.drag(h);
+            if (h.pinching && h.held) self.drag(h, h.mid);
 
-            // مشي: قبضة مغلقة 0.4 ثانية
-            if (fist && !h.pinching) { if (!h.fSince) h.fSince = now; } else h.fSince = 0;
-            h.walking = !!h.fSince && now - h.fSince > 400;
-
-            // جذب الأجسام (Gravity Gloves): يد مفتوحة موجّهة نحو جسم
-            self.aim.copy(MT.position).sub(wp).normalize();
+            // جذب الأجسام: يد مفتوحة + شعاع توجيه
             var tgt = null;
             if (open && !h.held) {
-              var bestC = 0.985;
+              var bestC = 0.975;
               document.querySelectorAll('[throwable]').forEach(function (b) {
                 if (b.components.throwable.held) return;
                 self.tmp.copy(b.object3D.position).sub(wp);
@@ -368,6 +418,20 @@
               if (tgt) self.glow(tgt, true);
               h.target = tgt;
             }
+
+            // رسم شعاع التوجيه
+            var showRay = open && !h.held;
+            h.ray.visible = showRay;
+            if (showRay) {
+              var len = tgt ? tgt.object3D.position.distanceTo(h.palm) : 2;
+              h.ray.position.copy(h.palm).addScaledVector(self.aim, len / 2);
+              h.ray.quaternion.setFromUnitVectors(UP, self.aim);
+              h.ray.scale.set(1, len, 1);
+              h.ray.material.color.setHex(tgt ? 0xfde047 : 0x22d3ee);
+              h.ray.material.opacity = tgt ? 0.9 : 0.35;
+            }
+
+            // سحب سريع نحو الجسم = جذب
             if (h.prevT) {
               self.vel.copy(wp).sub(h.prevW).divideScalar(Math.max(0.001, (now - h.prevT) / 1000));
               h.hv.lerp(self.vel, 0.5);
@@ -375,10 +439,24 @@
             h.prevW.copy(wp); h.prevT = now;
             if (tgt) {
               self.toHead.copy(self.cam).sub(wp).normalize();
-              if (h.hv.dot(self.toHead) > 1.6 && now - h.lastPull > 800) {   // سحب سريع نحوك
+              if (h.hv.dot(self.toHead) > 1.6 && now - h.lastPull > 800) {
                 h.lastPull = now;
-                self.pull(tgt, wp, self.aim);
+                self.pull(h, tgt);
               }
+            }
+
+            // الجسم المسحوب يستقر في راحة اليد؛ القبضة ترميه
+            if (h.pulling) {
+              var pe = h.pulling, pc = pe.components.throwable;
+              if (now > h.pullUntil || pc.held) h.pulling = null;
+              else if (open && pe.object3D.position.distanceTo(h.palm) < 0.16) {
+                h.held = pe; pc.held = true; pc.v.set(0, 0, 0);
+                h.caught = true; h.hist = []; h.pulling = null;
+              }
+            }
+            if (h.held && h.caught && !h.pinching) {
+              if (avg < 0.1) self.release(h);
+              else self.drag(h, h.palm);
             }
 
             // لمس الشخصيات بالسبابة
@@ -395,19 +473,38 @@
             var hh = this.hands[key];
             if (!seen[key]) {
               hh.group.visible = false;
-              hh.walking = false; hh.fSince = 0; hh.pSince = 0;
-              if (hh.pinching) { hh.pinching = false; this.release(hh); }
+              hh.pSince = 0; hh.pulling = null; hh.prevT = 0;
+              if (hh.pinching) hh.pinching = false;
+              if (hh.held) this.release(hh);
               if (hh.target) { this.glow(hh.target, false); hh.target = null; }
             }
           }
 
-          var Lh = this.hands.left, Rh = this.hands.right;
-          if ((Lh && Lh.walking) || (Rh && Rh.walking)) {
-            scene.camera.getWorldDirection(this.dir);
-            this.dir.y = 0;
+          // مشي بميلان الرأس
+          var busy = false;
+          for (var kk in this.hands) {
+            var q = this.hands[kk];
+            if (q.held || q.pinching || q.target) busy = true;
+          }
+          scene.camera.getWorldDirection(this.fwd);
+          var pitch = Math.asin(clamp(-this.fwd.y, -1, 1)) * 180 / Math.PI;   // موجب = نظر للأسفل
+          if (!this.tilting) {
+            if (pitch > cfg.tiltOn && !busy) {
+              if (!this.tSince) this.tSince = now;
+              else if (now - this.tSince > cfg.tiltHold) this.tilting = true;
+            } else this.tSince = 0;
+          } else if (pitch < cfg.tiltOff || busy) { this.tilting = false; this.tSince = 0; }
+
+          if (this.tilting) {
+            this.dir.copy(this.fwd); this.dir.y = 0;
+            if (this.dir.lengthSq() < 0.05) {                    // نظر شبه عمودي: استخدم اتجاه "أعلى" الرأس
+              scene.camera.getWorldQuaternion(this.q);
+              this.dir.copy(UP).applyQuaternion(this.q); this.dir.y = 0;
+            }
             if (this.dir.lengthSq() > 1e-6) {
               this.dir.normalize();
-              rig.position.addScaledVector(this.dir, 1.4 * Math.min(dt, 50) / 1000);
+              var speed = 0.5 + clamp((pitch - cfg.tiltOff) / 40, 0, 1) * 1.1;   // كلما زاد الميلان زادت السرعة
+              rig.position.addScaledVector(this.dir, speed * Math.min(dt, 50) / 1000);
               rig.position.x = clamp(rig.position.x, -3.4, 3.4);
               rig.position.z = clamp(rig.position.z, -3.4, 3.4);
               keepOutOfTable(rig.position);
@@ -649,9 +746,9 @@
   <div id="xr-panel">
     <div>انقر على الزر أو في أي مكان على الشاشة للدخول إلى وضع VR</div>
     <div class="help">
+      • مشي: أمِل رأسك للأسفل/الأمام قليلاً (أكثر من 30°) فتمشي باتجاه نظرك، وعدّل رأسك لتتوقف.<br>
       • إمساك: اقرص بالإبهام والسبابة قرب جسم (واترك الوسطى مفتوحة).<br>
-      • جذب: افتح يدك ووجّهها لكرة (تتوهج) ثم اسحب يدك نحوك بسرعة.<br>
-      • مشي: اقبض يدك لمدة 0.4 ثانية.<br>
+      • جذب: افتح يدك ووجّه الشعاع لكرة أو للمسدس (يتوهج)، ثم اسحب يدك نحوك بسرعة؛ يستقر في يدك، واقبض يدك لترميه.<br>
       • ليزر: أمسك المسدس بيد، واقرص باليد الأخرى بعيداً عن الأجسام.<br>
       • المس الشخصيات بإصبعك لتنحني.
     </div>
@@ -709,7 +806,7 @@
     </a-entity>
 
     <!-- منصة اللاعب: تبدأ أمام الطاولة (اليدان تُرسمان بواسطة hand-rig) -->
-    <a-entity id="rig" position="0 0 2.2" hand-rig>
+    <a-entity id="rig" position="0 0 2.2" hand-rig="tiltOn: 30; tiltOff: 20; tiltHold: 300">
       <a-camera look-controls wasd-controls></a-camera>
     </a-entity>
   </a-scene>
