@@ -3,9 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VR Rainbow Ball</title>
+  <title>VR Hands Room</title>
 
-  <!-- A-Frame 1.7.1 عبر HTTPS (jsDelivr) مع مصدر احتياطي -->
   <script src="https://cdn.jsdelivr.net/npm/aframe@1.7.1/dist/aframe.min.js"></script>
   <script>
     if (!window.AFRAME) {
@@ -16,76 +15,158 @@
   <style>
     html, body { margin: 0; height: 100%; background: #0f172a; }
     #xr-panel {
-      position: fixed;
-      top: 16px;
-      left: 50%;
-      transform: translateX(-50%);
-      z-index: 9999;
-      width: min(92vw, 420px);
-      padding: 14px 16px;
-      border-radius: 12px;
-      background: rgba(15, 23, 42, 0.88);
-      color: #f8fafc;
+      position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+      z-index: 9999; width: min(92vw, 440px); padding: 14px 16px; border-radius: 12px;
+      background: rgba(15, 23, 42, .88); color: #f8fafc; direction: rtl; text-align: center;
       font: 15px/1.6 system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif;
-      text-align: center;
-      direction: rtl;
     }
     #xr-btn {
-      margin-top: 6px;
-      padding: 10px 22px;
-      border: 0;
-      border-radius: 8px;
-      background: #2563eb;
-      color: #fff;
-      font: inherit;
-      font-weight: 600;
-      cursor: pointer;
+      margin-top: 6px; padding: 10px 22px; border: 0; border-radius: 8px;
+      background: #2563eb; color: #fff; font: inherit; font-weight: 600; cursor: pointer;
     }
     #xr-btn:disabled { opacity: .5; cursor: not-allowed; }
-    #xr-btn:focus-visible { outline: 3px solid #93c5fd; outline-offset: 2px; }
     #xr-status { margin-top: 8px; font-size: 13px; color: #cbd5e1; word-break: break-word; }
+    .help { font-size: 13px; color: #e2e8f0; }
   </style>
 
-  <!-- مكوّن ألوان الطيف: كل نقرة تنقل الكرة إلى اللون التالي -->
   <script>
-    if (window.AFRAME) {
-      AFRAME.registerComponent('rainbow-cycle', {
-        init: function () {
-          var el = this.el;
-          var colors = ['red', 'orange', 'yellow', 'green', 'blue', 'indigo', 'violet'];
-          var currentIndex = 0;
-
-          el.setAttribute('material', 'color', colors[currentIndex]);
-
-          el.addEventListener('click', function () {
-            currentIndex = (currentIndex + 1) % colors.length;
-            el.setAttribute('material', 'color', colors[currentIndex]);
-          });
-        }
-      });
-    }
-
-    // أي خطأ برمجي يظهر في اللوحة بدل شاشة بيضاء صامتة
     window.addEventListener('error', function (e) {
       var s = document.getElementById('xr-status');
       if (s) s.textContent = 'خطأ في الصفحة: ' + (e.message || e);
     });
+
+    if (window.AFRAME) {
+      var COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'indigo', 'violet'];
+
+      // كرة قابلة للإمساك والرمي مع فيزياء بسيطة (جاذبية + ارتداد)
+      AFRAME.registerComponent('throwable', {
+        schema: { start: { default: 0 }, radius: { default: 0.12 } },
+        init: function () {
+          var self = this;
+          this.v = new THREE.Vector3();
+          this.held = false;
+          this.i = this.data.start % COLORS.length;
+          this.paint();
+          this.el.addEventListener('click', function () { self.next(); });  // للماوس
+        },
+        paint: function () { this.el.setAttribute('material', 'color', COLORS[this.i]); },
+        next: function () { this.i = (this.i + 1) % COLORS.length; this.paint(); },
+        tick: function (t, dt) {
+          if (this.held) return;
+          dt = Math.min(dt, 50) / 1000;
+          var p = this.el.object3D.position, v = this.v, r = this.data.radius, grounded = false;
+
+          v.y -= 9.8 * dt;
+          p.addScaledVector(v, dt);
+
+          // سطح الطاولة (مركزها 0,?,-3 وعرضها 1.5 وارتفاعها 1)
+          if (Math.abs(p.x) < 0.75 && Math.abs(p.z + 3) < 0.75 && p.y - r < 1 && p.y - r > 0.8 && v.y < 0) {
+            p.y = 1 + r; v.y *= -0.4; grounded = true;
+          }
+          // الأرضية
+          if (p.y < r) { p.y = r; v.y *= -0.6; grounded = true; }
+          if (grounded && Math.abs(v.y) < 0.4) v.y = 0;
+          if (grounded) { var f = Math.max(0, 1 - 1.5 * dt); v.x *= f; v.z *= f; }
+
+          // السقف والجدران (الغرفة 8×8×4)
+          if (p.y > 4 - r) { p.y = 4 - r; v.y *= -0.5; }
+          var L = 4 - r;
+          if (p.x > L)  { p.x = L;  v.x *= -0.6; }
+          if (p.x < -L) { p.x = -L; v.x *= -0.6; }
+          if (p.z > L)  { p.z = L;  v.z *= -0.6; }
+          if (p.z < -L) { p.z = -L; v.z *= -0.6; }
+        }
+      });
+
+      // قرصة اليد (إبهام + سبابة): role=grab للإمساك والرمي، role=walk للمشي
+      AFRAME.registerComponent('pinch-actions', {
+        schema: { role: { default: 'grab' } },
+        init: function () {
+          var self = this;
+          this.pinching = false;
+          this.held = null;
+          this.hist = [];
+          this.dir = new THREE.Vector3();
+          this.el.addEventListener('pinchstarted', function (e) {
+            self.pinching = true;
+            if (self.data.role === 'grab') self.grab(self.toWorld(e.detail.position));
+          });
+          this.el.addEventListener('pinchmoved', function (e) {
+            if (self.held) self.drag(self.toWorld(e.detail.position));
+          });
+          this.el.addEventListener('pinchended', function () {
+            self.pinching = false;
+            self.release();
+          });
+        },
+        toWorld: function (p) {
+          var v = new THREE.Vector3(p.x, p.y, p.z);
+          this.el.object3D.parent.localToWorld(v);   // الإحداثيات نسبة إلى المنصة #rig
+          return v;
+        },
+        grab: function (tip) {
+          var best = null, bestD = 0.18, tmp = new THREE.Vector3();
+          document.querySelectorAll('[throwable]').forEach(function (b) {
+            if (b.components.throwable.held) return;
+            var d = b.object3D.getWorldPosition(tmp).distanceTo(tip);
+            if (d < bestD) { bestD = d; best = b; }
+          });
+          if (!best) return;
+          this.held = best;
+          best.components.throwable.held = true;
+          best.components.throwable.v.set(0, 0, 0);
+          best.components.throwable.next();          // يتغير اللون عند الإمساك
+          this.hist = [];
+          this.drag(tip);
+        },
+        drag: function (pos) {
+          this.held.object3D.position.copy(pos);
+          this.hist.push({ t: performance.now(), p: pos.clone() });
+          while (this.hist.length > 2 && performance.now() - this.hist[0].t > 120) this.hist.shift();
+        },
+        release: function () {
+          if (!this.held) return;
+          var comp = this.held.components.throwable, h = this.hist;
+          if (h.length >= 2) {
+            var a = h[0], b = h[h.length - 1], dt = (b.t - a.t) / 1000;
+            if (dt > 0) {
+              comp.v.copy(b.p).sub(a.p).divideScalar(dt).multiplyScalar(1.2);
+              if (comp.v.length() > 12) comp.v.setLength(12);
+            }
+          }
+          comp.held = false;
+          this.held = null;
+          this.hist = [];
+        },
+        tick: function (t, dt) {
+          if (this.data.role !== 'walk' || !this.pinching) return;
+          var scene = this.el.sceneEl, rig = document.getElementById('rig').object3D;
+          scene.camera.getWorldDirection(this.dir);
+          this.dir.y = 0;
+          if (this.dir.lengthSq() < 1e-6) return;
+          this.dir.normalize();
+          rig.position.addScaledVector(this.dir, 1.6 * Math.min(dt, 50) / 1000);
+          rig.position.x = Math.max(-3.4, Math.min(3.4, rig.position.x));
+          rig.position.z = Math.max(-3.4, Math.min(3.4, rig.position.z));
+        }
+      });
+    }
   </script>
 </head>
 
 <body>
   <div id="xr-panel">
     <div>انقر على الزر أو في أي مكان على الشاشة للدخول إلى وضع VR</div>
+    <div class="help">اليد اليسرى: اقرص (إبهام + سبابة) وأنت تنظر لتمشي. اليد اليمنى: اقرص قرب كرة لتمسكها، وافتح أصابعك لترميها.</div>
     <button id="xr-btn" type="button">الدخول إلى VR</button>
     <div id="xr-status">جارٍ فحص دعم WebXR...</div>
   </div>
 
   <a-scene background="color: #0f172a"
-           webxr="requiredFeatures: local-floor; optionalFeatures: bounded-floor"
+           webxr="requiredFeatures: local-floor; optionalFeatures: bounded-floor, hand-tracking"
            cursor="rayOrigin: mouse"
            raycaster="objects: .clickable">
 
-    <!-- الإضاءة -->
     <a-entity light="type: ambient; color: #ffffff; intensity: 0.6"></a-entity>
     <a-entity light="type: directional; color: #ffffff; intensity: 0.8" position="2 4 2"></a-entity>
 
@@ -100,100 +181,75 @@
     <!-- الطاولة -->
     <a-box position="0 0.5 -3" width="1.5" height="1" depth="1.5" color="#4e3629"></a-box>
 
-    <!-- الكرة -->
-    <a-sphere class="clickable"
-              position="0 1.3 -3"
-              radius="0.3"
-              rainbow-cycle
-              animation__scale="property: scale; to: 1.1 1.1 1.1; startEvents: mouseenter; dur: 200"
-              animation__scale_out="property: scale; to: 1 1 1; startEvents: mouseleave; dur: 200">
-    </a-sphere>
+    <!-- الكرات (القطر 0.24م) -->
+    <a-sphere class="clickable" radius="0.12" position="-0.4 1.2 -3.3" throwable="start: 0"></a-sphere>
+    <a-sphere class="clickable" radius="0.12" position="0.4 1.2 -3.3" throwable="start: 2"></a-sphere>
+    <a-sphere class="clickable" radius="0.12" position="0 1.2 -3" throwable="start: 4"></a-sphere>
+    <a-sphere class="clickable" radius="0.12" position="-0.4 1.2 -2.7" throwable="start: 5"></a-sphere>
+    <a-sphere class="clickable" radius="0.12" position="0.4 1.2 -2.7" throwable="start: 6"></a-sphere>
 
-    <!-- منصة اللاعب: الكاميرا + أذرع التحكم -->
+    <!-- منصة اللاعب: الكاميرا + اليدان (بدون أذرع تحكم) -->
     <a-entity id="rig" position="0 0 0">
       <a-camera look-controls wasd-controls></a-camera>
-      <a-entity laser-controls="hand: right" raycaster="objects: .clickable; far: 10"></a-entity>
-      <a-entity laser-controls="hand: left" raycaster="objects: .clickable; far: 10"></a-entity>
+      <a-entity hand-tracking-controls="hand: left; modelStyle: dots; modelColor: #ffcfa8" pinch-actions="role: walk"></a-entity>
+      <a-entity hand-tracking-controls="hand: right; modelStyle: dots; modelColor: #ffcfa8" pinch-actions="role: grab"></a-entity>
     </a-entity>
   </a-scene>
 
   <script>
     (function () {
-      var panel    = document.getElementById('xr-panel');
-      var btn      = document.getElementById('xr-btn');
+      var panel = document.getElementById('xr-panel');
+      var btn = document.getElementById('xr-btn');
       var statusEl = document.getElementById('xr-status');
-      function say(msg) { statusEl.textContent = msg; }
+      function say(m) { statusEl.textContent = m; }
 
       if (!window.AFRAME) {
         btn.disabled = true;
-        say('تعذّر تحميل مكتبة A-Frame من الإنترنت (jsDelivr وaframe.io). تحقق من الاتصال أو من حظر المواقع ثم أعد تحميل الصفحة.');
+        say('تعذّر تحميل مكتبة A-Frame من الإنترنت (jsDelivr وaframe.io). تحقق من الاتصال ثم أعد تحميل الصفحة.');
         return;
       }
 
       var sceneEl = document.querySelector('a-scene');
-      var rigEl   = document.getElementById('rig');
-      var xrSupported = false;
-      var tapUsed = false;
-      var entering = false;
-
-      // 'floor': مرجع الأرضية local-floor (الأفضل)
-      // 'local': وضع التوافق بلا ميزات مطلوبة، مع رفع المنصة 1.6م يدوياً
-      var mode = 'floor';
+      var rigEl = document.getElementById('rig');
+      var xrSupported = false, tapUsed = false, entering = false;
+      var mode = 'floor';   // 'floor' = local-floor | 'local' = وضع التوافق
 
       function checkSupport() {
-        if (!window.isSecureContext) {
-          say('الصفحة غير آمنة (' + location.protocol + '//). WebXR تعمل فقط عبر HTTPS أو localhost.');
-          return;
-        }
-        if (!navigator.xr) {
-          say('هذا المتصفح لا يوفّر WebXR.');
-          return;
-        }
+        if (!window.isSecureContext) { say('الصفحة غير آمنة. WebXR تعمل فقط عبر HTTPS أو localhost.'); return; }
+        if (!navigator.xr) { say('هذا المتصفح لا يوفّر WebXR.'); return; }
         navigator.xr.isSessionSupported('immersive-vr').then(function (ok) {
           xrSupported = ok;
-          say(ok ? 'WebXR جاهز. اضغط للدخول.' : 'هذا الجهاز لا يدعم immersive-vr (طبيعي على الكمبيوتر بدون نظارة).');
-        }).catch(function (e) {
-          say('تعذّر فحص WebXR: ' + e.message);
-        });
+          say(ok ? 'WebXR جاهز. اضغط للدخول.' : 'هذا الجهاز لا يدعم immersive-vr.');
+        }).catch(function (e) { say('تعذّر فحص WebXR: ' + e.message); });
       }
 
-      // يعرض السبب الحقيقي (DOMException) وليس رسالة A-Frame العامة فقط
       function describe(e) {
-        var parts = [];
-        var cur = e, depth = 0;
-        while (cur && depth < 3) {
-          parts.push((cur.name ? cur.name + ': ' : '') + (cur.message || cur));
-          cur = cur.cause;
-          depth++;
-        }
+        var parts = [], cur = e, n = 0;
+        while (cur && n++ < 3) { parts.push((cur.name ? cur.name + ': ' : '') + (cur.message || cur)); cur = cur.cause; }
         return parts.join(' | ');
       }
 
       function applyMode() {
         var xr = sceneEl.systems && sceneEl.systems.webxr;
         if (mode === 'local') {
-          if (xr) xr.sessionConfiguration = { requiredFeatures: [], optionalFeatures: [] };
+          if (xr) xr.sessionConfiguration = { requiredFeatures: [], optionalFeatures: ['hand-tracking'] };
           sceneEl.renderer.xr.setReferenceSpaceType('local');
         }
       }
 
       function onFail(e) {
         console.error(e);
-        entering = false;
-        tapUsed = false;
+        entering = false; tapUsed = false;
         var text = describe(e);
-
-        // الإعداد القياسي غير مدعوم: انتقل لوضع التوافق وأعد المحاولة مرة واحدة
         if (mode === 'floor' && /NotSupportedError/.test(text)) {
           mode = 'local';
           say('الإعداد القياسي غير مدعوم، جارٍ تجربة وضع التوافق...');
           enterXR();
           return;
         }
-        say('تعذّر الدخول إلى VR (' + mode + '): ' + text + ' — اضغط مرة أخرى للمحاولة.');
+        say('تعذّر الدخول إلى VR (' + mode + '): ' + text + ' — اضغط مرة أخرى.');
       }
 
-      // يجب أن يُستدعى من داخل حدث نقر حتى يقبله المتصفح (User Activation)
       function enterXR() {
         if (entering || sceneEl.is('vr-mode')) return;
         if (!sceneEl.hasLoaded) { say('المشهد لم يكتمل تحميله بعد، حاول مرة أخرى.'); return; }
@@ -206,8 +262,6 @@
       }
 
       btn.addEventListener('click', enterXR);
-
-      // أول نقرة في أي مكان على الشاشة تدخل VR (إن كان مدعوماً)
       document.addEventListener('click', function (ev) {
         if (tapUsed || !xrSupported || entering) return;
         if (ev.target.closest && ev.target.closest('#xr-panel, .a-enter-vr, .a-enter-vr-button')) return;
@@ -221,9 +275,8 @@
         if (mode === 'local') rigEl.setAttribute('position', '0 1.6 0');
       });
       sceneEl.addEventListener('exit-vr', function () {
-        entering = false;
+        entering = false; tapUsed = false;
         panel.style.display = '';
-        tapUsed = false;
         rigEl.setAttribute('position', '0 0 0');
       });
 
